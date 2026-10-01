@@ -2,15 +2,11 @@
 use rusqlite::Connection;
 use tauri::Manager;
 
-/// 获取数据库文件放置路径（应用数据目录下 moneybook.db）
+/// 获取数据库文件放置路径（取自启动时的数据目录决策：便携目录或系统标准目录）
 #[tauri::command]
 pub fn get_db_path(app: tauri::AppHandle) -> Result<String, String> {
-    let dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| e.to_string())?;
-    let path = dir.join("moneybook.db");
-    Ok(path.to_string_lossy().to_string())
+    let loc = app.state::<crate::datadir::DbLocation>();
+    Ok(loc.file.to_string_lossy().to_string())
 }
 
 /// 使用 rusqlite 的 Online Backup 将数据库备份到目标文件

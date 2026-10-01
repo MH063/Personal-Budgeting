@@ -7,11 +7,10 @@
  * 已封装能力：
  *   - 查询余额：            GET  /user/balance
  *   - FIM 补全（Beta）：     POST /beta/completions
- *   - 知识库/文件管理：
- *       上传文件            POST /files（multipart/form-data）
- *       列出文件            GET  /files
- *       查询单个文件        GET  /files/:file_id
- *       删除文件            DELETE /files/:file_id
+ *
+ * 说明：原「知识库 / 文件管理（/files）」封装已移除——参考文档改为「本地文档统一」方案
+ * （见设置页知识库区块）：文档内容存本机、随 AI 请求注入系统提示，全服务商一致生效，
+ * 不再依赖 DeepSeek 云端文件接口，也避免把参考文档上传到服务商云端。
  *
  * 关于上下文缓存（kv_cache）：DeepSeek 的「磁盘上下文缓存」是**自动生效**的，
  * 无需任何额外的显式请求或参数。只要连续请求复用相同的前缀（例如固定的
@@ -142,79 +141,4 @@ export async function completeFIM(req: FIMRequest): Promise<FIMResult> {
   if (!text) throw new Error('POST /beta/completions 返回空文本');
   console.log('[deepseek] FIM 补全成功', { len: text.length });
   return { text, finishReason: data.choices?.[0]?.finish_reason, model: data.model };
-}
-
-// =====================================================================
-// 3. 知识库 / 文件管理  /files
-// =====================================================================
-export interface DeepSeekFile {
-  id: string;
-  object: string;
-  bytes: number;
-  created_at: number;
-  filename: string;
-  purpose: string;
-  status?: string;
-  status_details?: unknown;
-}
-
-export type FilePurpose = 'assistants' | 'batch' | 'fine-tune';
-
-/** 列出所有已上传文件  GET /files */
-export async function listFiles(): Promise<DeepSeekFile[]> {
-  const a = deepSeekAuth();
-  if (!a) throw new Error('请在设置中配置且激活 DeepSeek 凭证后使用文件管理');
-  const url = `${a.baseURL}/files`;
-  const res = await httpFetch(url, {
-    method: 'GET',
-    headers: { Authorization: `Bearer ${a.apiKey}` },
-  });
-  const data = await jsonOrThrow<{ data?: DeepSeekFile[] }>(res, url);
-  console.log('[deepseek] 列出文件成功', data.data?.length ?? 0);
-  return data.data ?? [];
-}
-
-/** 查询单个文件  GET /files/:file_id */
-export async function getFile(fileId: string): Promise<DeepSeekFile> {
-  const a = deepSeekAuth();
-  if (!a) throw new Error('请在设置中配置且激活 DeepSeek 凭证后使用文件管理');
-  const url = `${a.baseURL}/files/${encodeURIComponent(fileId)}`;
-  const res = await httpFetch(url, { method: 'GET', headers: { Authorization: `Bearer ${a.apiKey}` } });
-  const data = await jsonOrThrow<DeepSeekFile>(res, url);
-  console.log('[deepseek] 查询单个文件成功', data.id);
-  return data;
-}
-
-/** 上传文件（知识库参考文档） POST /files（multipart/form-data）
- *  浏览器自动设置 multipart boundary，无需手动指定 Content-Type。 */
-export async function uploadFile(file: Blob, filename: string, purpose: FilePurpose = 'assistants'): Promise<DeepSeekFile> {
-  const a = deepSeekAuth();
-  if (!a) throw new Error('请在设置中配置且激活 DeepSeek 凭证后使用文件管理');
-  const url = `${a.baseURL}/files`;
-  const form = new FormData();
-  form.append('file', file, filename);
-  form.append('purpose', purpose);
-  const res = await httpFetch(url, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${a.apiKey}` },
-    body: form,
-  });
-  const data = await jsonOrThrow<DeepSeekFile>(res, url);
-  console.log('[deepseek] 上传文件成功', data.id);
-  return data;
-}
-
-/** 删除文件  DELETE /files/:file_id。返回是否成功删除。 */
-export async function deleteFile(fileId: string): Promise<boolean> {
-  const a = deepSeekAuth();
-  if (!a) throw new Error('请在设置中配置且激活 DeepSeek 凭证后使用文件管理');
-  const url = `${a.baseURL}/files/${encodeURIComponent(fileId)}`;
-  const res = await httpFetch(url, {
-    method: 'DELETE',
-    headers: { Authorization: `Bearer ${a.apiKey}` },
-  });
-  const data = await jsonOrThrow<{ deleted?: boolean }>(res, url);
-  const ok = data.deleted === true || res.ok;
-  console.log('[deepseek] 删除文件', fileId, ok);
-  return ok;
 }

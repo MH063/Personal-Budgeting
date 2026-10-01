@@ -8,6 +8,7 @@ import { DIM_KEY } from '@/lib/constants';
 import { StatCard } from '@/components/common/StatCard';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
+import { Hint } from '@/components/ui/hint';
 
 /**
  * 月度体检：由原"统计 → 洞察"迁入智能洞察页的区块组件。
@@ -81,13 +82,10 @@ export default function MonthlyCheckup() {
               入口会把当前选择的月份与维度带入弹窗，体检/预测据此分析对应月份 */}
           <div className="mt-4 rounded-xl border border-[var(--border)] bg-[var(--card)] p-4">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <div>
-                <h3 className="font-semibold">🤖 AI 深度分析（体检 / 下月预测 / 预算建议）</h3>
-                <div className="text-xs text-muted">
-                  在本地诊断之上，由 AI 完成归因解释与前瞻；仅上送脱敏汇总（不含单笔明细）。已统一到全局 AI 助手弹窗，
-                  将以当前选择的月份与维度进行分析。
-                </div>
-              </div>
+              <h3 className="flex items-center gap-1.5 font-semibold">
+                🤖 AI 深度分析（体检 / 下月预测 / 预算建议）
+                <Hint text="在本地诊断之上，由 AI 完成归因解释与前瞻；仅上送脱敏汇总（不含单笔明细）。已统一到全局 AI 助手弹窗，将以当前选择的月份与维度进行分析。" />
+              </h3>
               <Button size="sm" onClick={() => useAiAssistantStore.getState().openAssistant({ month, dim })}>
                 打开 AI 助手
               </Button>

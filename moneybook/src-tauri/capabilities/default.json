@@ -20,6 +20,8 @@
     "fs:allow-exists",
     "clipboard-manager:allow-write-text",
     "clipboard-manager:allow-read-text",
+    "updater:default",
+    "process:allow-restart",
     {
       "identifier": "http:default",
       "allow": [

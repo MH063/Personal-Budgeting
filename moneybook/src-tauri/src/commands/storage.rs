@@ -14,8 +14,14 @@ use tauri::Manager;
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StorageOverview {
-    /// 应用数据目录绝对路径
+    /// 应用数据目录绝对路径（真实路径：便携目录或系统标准目录）
     pub app_dir: String,
+    /// 数据目录模式：portable（程序目录\data）/ standard（系统标准目录）
+    pub mode: String,
+    /// 便携目标目录（程序目录\data），供前端展示「迁移到程序目录」入口
+    pub portable_dir: String,
+    /// 是否可迁移到便携目录（当前为标准模式 + 程序目录可写 + 便携目录尚无库）
+    pub can_migrate: bool,
     /// 主库 moneybook.db 字节数
     pub db_size: u64,
     /// 预写日志 moneybook.db-wal 字节数
@@ -141,11 +147,25 @@ fn sidecar(db: &std::path::Path, suffix: &str) -> std::path::PathBuf {
 /// 获取存储概览：应用数据占用明细 + 磁盘总/已用/可用
 #[tauri::command]
 pub fn get_storage_overview(app: tauri::AppHandle) -> Result<StorageOverview, String> {
-    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let db = dir.join("moneybook.db");
+    let loc = app.state::<crate::datadir::DbLocation>();
+    let dir = loc.dir.clone();
+    let db = loc.file.clone();
+    // 便携迁移可用性：标准模式 + 程序目录可写 + 便携目录尚无库。
+    // 只在标准模式下提示迁移（已是便携模式自然无需），且不做副作用（写探测文件会清理）。
+    let portable_dir = crate::datadir::portable_target_dir();
+    let can_migrate = loc.mode == crate::datadir::DataDirMode::Standard
+        && portable_dir
+            .as_ref()
+            .map(|p| dir_executable_probe(p) && !p.join("moneybook.db").exists())
+            .unwrap_or(false);
     let (disk_total, disk_used, disk_free) = disk_space_of(&dir);
     Ok(StorageOverview {
         app_dir: dir.to_string_lossy().to_string(),
+        mode: loc.mode_str().to_string(),
+        portable_dir: portable_dir
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default(),
+        can_migrate,
         db_size: file_size(&db),
         wal_size: file_size(&sidecar(&db, "-wal")),
         bak_size: file_size(&sidecar(&db, ".bak")),
@@ -157,10 +177,27 @@ pub fn get_storage_overview(app: tauri::AppHandle) -> Result<StorageOverview, St
     })
 }
 
+/// 迁移可用性探测：目录可写（创建 + 写删探测文件）。
+/// 注意这是「预检」——真正迁移时 Rust 侧还会再校验一次；探测失败只影响提示，不影响任何数据。
+fn dir_executable_probe(dir: &std::path::Path) -> bool {
+    if std::fs::create_dir_all(dir).is_err() {
+        return false;
+    }
+    let probe = dir.join(".write_probe");
+    match std::fs::write(&probe, b"ok") {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
 /// 清理可安全删除的缓存文件（.corrupt.* / *.tmp），返回释放的字节数
 #[tauri::command]
 pub fn clean_storage_cache(app: tauri::AppHandle) -> Result<u64, String> {
-    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let loc = app.state::<crate::datadir::DbLocation>();
+    let dir = loc.dir.clone();
     let entries = std::fs::read_dir(&dir).map_err(|e| e.to_string())?;
     let mut freed = 0u64;
     for e in entries.flatten() {

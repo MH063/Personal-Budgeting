@@ -12,10 +12,11 @@
 use rusqlite::Connection;
 use tauri::Manager;
 
-/// moneybook.db 在应用数据目录下的完整路径
+/// moneybook.db 的完整路径：取自启动时的数据目录决策结果（便携优先 / 回退标准目录），
+/// 与插件连接、事务连接使用同一份路径，避免多处各自推算导致指向不一致。
 pub fn db_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
-    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    Ok(dir.join("moneybook.db"))
+    let loc = app.state::<crate::datadir::DbLocation>();
+    Ok(loc.file.clone())
 }
 
 /// 快照路径：moneybook.db.bak

@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
+import { Hint } from '@/components/ui/hint';
 import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
 import { loadUserRules, saveUserRules, learnCorrection, type UserRule } from '@/api/merchantNorm';
@@ -78,10 +79,10 @@ export default function RuleManage() {
   return (
     <div className="space-y-4">
       <div>
-        <h2 className="mb-1 text-lg font-semibold">智能规则</h2>
-        <p className="text-sm text-muted">
-          用户规则 &gt; 内置同义 &gt; AI/默认的优先级执行。命中即生效并显示“依据”，可在记账/导入时一键采用；全部本地存储。
-        </p>
+        <h2 className="mb-1 flex items-center gap-1.5 text-lg font-semibold">
+          智能规则
+          <Hint text="用户规则 > 内置同义 > AI/默认的优先级执行。命中即生效并显示「依据」，可在记账/导入时一键采用；全部本地存储。" />
+        </h2>
       </div>
 
       <div className="flex flex-wrap items-center gap-2">

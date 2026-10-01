@@ -4,6 +4,7 @@ import dayjs from 'dayjs';
 import { PageHeader } from '@/components/common/PageHeader';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
+import { Hint } from '@/components/ui/hint';
 import { formatMoney } from '@/lib/format';
 import { buildExpenseForecast } from '@/api/predict';
 import { buildSubscriptionReminders, nextDueDate, cancellationGuide } from '@/api/subscription';
@@ -85,12 +86,9 @@ export default function InsightsPage() {
       />
 
       {/* —— AI 助手统一入口（合并原「财务问答」与月度体检「AI 深度分析」） —— */}
-      <section>
+      <section className="flex items-center gap-1.5">
         <Button type="button" onClick={() => useAiAssistantStore.getState().openAssistant()}>💬 打开 AI 助手（连续对话 · 报告 · 体检）</Button>
-        <p className="mt-2 text-xs text-muted">
-          仪表盘、智能洞察与月度体检的 AI 能力已合并到此弹窗，同一对话内共享上下文，避免重复调用、重复计费；
-          启用 AI 后仅上送脱敏聚合事实，不上送单笔明细。
-        </p>
+        <Hint text="仪表盘、智能洞察与月度体检的 AI 能力已合并到此弹窗，同一对话内共享上下文，避免重复调用、重复计费；启用 AI 后仅上送脱敏聚合事实，不上送单笔明细。" />
       </section>
 
       {/* —— 月度体检（并入智能洞察的统一区块，与各引擎连贯展示） —— */}

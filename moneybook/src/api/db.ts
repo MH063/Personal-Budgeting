@@ -29,7 +29,13 @@ async function getTauriConn(): Promise<any> {
   if (!connPromise) {
     connPromise = (async () => {
       const DBM = await import('@tauri-apps/plugin-sql');
-      const conn = await DBM.default.load('sqlite:moneybook.db');
+      // 连接串必须与 Rust 侧 add_migrations 注册串「逐字一致」：
+      // tauri-plugin-sql 按连接串字符串全等匹配迁移表，若前端自行拼接路径，
+      // 一旦与 Rust 决策结果有差异（大小写、分隔符、目录不同），迁移就会失配。
+      // 数据目录在 Rust 启动时已决策（便携优先 / 回退标准），此处直接取结果使用。
+      const { invoke } = await import('@tauri-apps/api/core');
+      const dbUrl = await invoke<string>('get_db_url');
+      const conn = await DBM.default.load(dbUrl);
       // 补齐桌面库缺失的表/列（幂等；迁移文件由插件保证执行，此处只覆盖迁移文件未覆盖的增量）
       await ensureRawSchema(conn);
       tauriConn = conn;

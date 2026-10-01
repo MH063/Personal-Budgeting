@@ -1,4 +1,4 @@
-// 版本比较与 GitHub 仓库地址解析（纯函数，供「关于」更新检查与单元测试使用）
+// 版本工具（纯函数，供「关于」更新检查、发布校验与单元测试使用，无任何外部依赖）
 
 /**
  * 语义化版本比较：a > b 返回 1，a < b 返回 -1，相等返回 0。
@@ -17,14 +17,13 @@ export function compareVersion(a: string, b: string): number {
 }
 
 /**
- * 解析 GitHub 仓库标识：支持完整地址、SSH 形式与裸 owner/repo。
- * 无法识别时返回 null（例如用户只填了域名或空串）。
+ * 解析 GitHub Release tag 为「正式三段版本号」；非正式版返回 null。
+ * 规则（与发布流程一致）：只接受 x.y.z（可带 v 前缀）；
+ *   - 四段测试版 1.0.0.1   → null（测试版永不进 stable 渠道）
+ *   - 带后缀预发布 1.0.0-rc.1 / 1.0.0-beta.2 → null
+ * 这是更新检查的客户端防线：即使误把测试版发成 Release，也不会提示用户更新。
  */
-export function parseRepoSlug(raw: string): string | null {
-  const t = String(raw ?? '').trim().replace(/\.git$/i, '').replace(/\/+$/, '');
-  if (!t) return null;
-  const m = t.match(/github\.com[/:]([^/\s]+)\/([^/\s]+)$/i);
-  if (m) return `${m[1]}/${m[2]}`;
-  if (/^[^/\s]+\/[^/\s]+$/.test(t)) return t;
-  return null;
+export function parseStableTag(tag: string): string | null {
+  const t = String(tag ?? '').trim().replace(/^v/i, '');
+  return /^\d+\.\d+\.\d+$/.test(t) ? t : null;
 }

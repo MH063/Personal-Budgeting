@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
+import { Hint } from '@/components/ui/hint';
 import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
 import { listTemplates, createTemplate, deleteTemplate, type TxnTemplate, type TxnTemplatePayload } from '@/api/txnTemplate';
@@ -91,10 +92,10 @@ export default function TemplateManage() {
   return (
     <div className="space-y-4">
       <div>
-        <h2 className="mb-1 text-lg font-semibold">常用交易模板</h2>
-        <p className="text-sm text-muted">
-          高频交易存成模板，记账页一键套用。金额留空即为“每次手填”。全部本地存储，无网络。
-        </p>
+        <h2 className="mb-1 flex items-center gap-1.5 text-lg font-semibold">
+          常用交易模板
+          <Hint text="高频交易存成模板，记账页一键套用。金额留空即为「每次手填」。全部本地存储，无网络。" />
+        </h2>
       </div>
 
       {/* 新建模板 */}

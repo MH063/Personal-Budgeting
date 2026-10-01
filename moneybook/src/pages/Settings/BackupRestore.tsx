@@ -3,6 +3,7 @@ import { toast } from 'sonner';
 import dayjs from 'dayjs';
 import { getKV, setKV } from '@/api/kv';
 import { Button } from '@/components/ui/button';
+import { Hint } from '@/components/ui/hint';
 import { ConfirmDialog } from '@/components/common/ConfirmDialog';
 import { LAST_BACKUP_KEY, STORAGE_SAVE_DIR_KEY } from '@/lib/constants';
 import { exportAllData, maskExportBundle } from '@/api/dataExport';
@@ -113,10 +114,10 @@ export default function BackupRestore() {
       )}
 
       <div className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-4">
-        <h3 className="mb-1 font-semibold">数据备份</h3>
-        <p className="mb-3 text-sm text-muted">
-          导出 SQLite 数据库文件到本地，涵盖全部账本、分类与设置。
-        </p>
+        <h3 className="mb-3 flex items-center gap-1.5 font-semibold">
+          数据备份
+          <Hint text="导出 SQLite 数据库文件到本地，涵盖全部账本、分类与设置。" />
+        </h3>
         <div className="flex items-center gap-3">
           <Button onClick={handleBackup}>导出数据库备份</Button>
           <span className="text-sm text-muted">
@@ -125,10 +126,10 @@ export default function BackupRestore() {
         </div>
       </div>
       <div className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-4">
-        <h3 className="mb-1 font-semibold">导出全部数据（JSON）</h3>
-        <p className="mb-3 text-sm text-muted">
-          把所有业务数据导出为可读的 JSON 文件。默认对备注/收款方/卡号等做脱敏，导出文件含个人敏感信息，请妥善保管、勿外传。
-        </p>
+        <h3 className="mb-3 flex items-center gap-1.5 font-semibold">
+          导出全部数据（JSON）
+          <Hint text="把所有业务数据导出为可读的 JSON 文件。默认对备注/收款方/卡号等做脱敏，导出文件含个人敏感信息，请妥善保管、勿外传。" />
+        </h3>
         <div className="flex items-center gap-2">
           <Button variant="outline" onClick={() => void handleExportAll(false)}>导出全部数据（已脱敏）</Button>
           <Button variant="ghost" size="sm" onClick={() => setPendingSensitiveExport(true)}>导出含敏感字段…</Button>

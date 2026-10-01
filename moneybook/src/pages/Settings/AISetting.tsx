@@ -8,6 +8,7 @@ import { Input } from '@/components/ui/input';
 import { Select, type SelectOption } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
 import { Modal } from '@/components/ui/modal';
+import { Hint } from '@/components/ui/hint';
 import { ConfirmDialog } from '@/components/common/ConfirmDialog';
 import { maskKey } from '@/api/encrypt';
 import {
@@ -22,11 +23,7 @@ import {
 import {
   isDeepSeekHost,
   fetchBalance,
-  listFiles,
-  uploadFile,
-  deleteFile,
   type DeepSeekBalance,
-  type DeepSeekFile,
 } from '@/api/deepseek';
 
 const presetOptions: SelectOption[] = PROVIDER_PRESETS.map((p) => ({
@@ -132,6 +129,13 @@ export default function AISetting() {
 
   // 记录“进入编辑”时的真实 Key 与密文，用于保存时判断是否被用户修改
   const originalKeyRef = useRef<{ id: string; key: string; enc: string }>({ id: '', key: '', enc: '' });
+  /**
+   * 「新增后尚未保存过」的草稿凭证 id（历史 Bug 修复）。
+   * 由来：新增凭证会先落库以获得弹窗内的可编辑实体；若用户随后选择「不保存并关闭」，
+   * 这条未配置的空壳会残留在凭证目录（多模型切换）里——用户明确反馈过此问题。
+   * 口径：点新增时记录 id；点「保存」成功后清除；关闭弹窗（未保存路径）时统一清理。
+   */
+  const pendingDraftIdRef = useRef<string | null>(null);
 
   const sel = providers.find((p) => p.id === selId) ?? null;
   const preset: ProviderPreset | undefined = getPreset(presetId);
@@ -230,12 +234,28 @@ export default function AISetting() {
     );
   }
 
+  /**
+   * 放弃「新增后从未保存」的草稿凭证（历史 Bug 修复）。
+   * 用户点「不保存并关闭」时，弹窗里的修改不保留；同理，新增时落库的初始空壳也不应保留。
+   * 若本次弹窗期间点过「保存」，ref 已被清除，这里不做任何处理。
+   * 删除受 store 的「生效凭证保护」约束：若该条已成为当前使用且存在其它凭证，
+   * removeProvider 会拒绝（返回 false），此时保留不删（提示用户可手动删除）。
+   */
+  function discardDraftIfNeeded() {
+    const draftId = pendingDraftIdRef.current;
+    if (!draftId) return;
+    pendingDraftIdRef.current = null;
+    if (removeProvider(draftId)) toast.success('已放弃未保存的凭证');
+  }
+
   /** 关闭编辑弹窗入口：有未保存修改时先弹确认，避免「误点关闭 → 表单内容丢失」 */
   function requestCloseEdit() {
     if (isEditDirty()) {
       setCloseConfirmOpen(true);
       return;
     }
+    // 新增后未填任何内容即关闭：清掉落库的初始空壳，目录不残留
+    discardDraftIfNeeded();
     setEditOpen(false);
   }
 
@@ -336,6 +356,7 @@ export default function AISetting() {
       patch.apiKey = eff;
     }
     await updateProvider(sel.id, patch);
+    pendingDraftIdRef.current = null; // 已保存：草稿转正，后续关闭不再清理
     setSaving(false);
     toast.success('已保存（Key 已加密存储）');
     return true;
@@ -373,6 +394,7 @@ export default function AISetting() {
   function onAddProvider() {
     const pre = getPreset(addPresetId) ?? PROVIDER_PRESETS[0];
     const id = addProvider(pre);
+    pendingDraftIdRef.current = id; // 标记草稿：未保存关闭时一并清理，目录不留空壳
     setSelId(id);
     setEditOpen(true);
     toast.success(`已添加「${pre.name}」，请在弹窗中完成配置`);
@@ -385,17 +407,21 @@ export default function AISetting() {
     <div className="space-y-5">
       <div className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-4">
         <div className="flex items-center justify-between">
-          <div>
-            <div className="font-semibold">启用 AI 助手</div>
-            <div className="text-xs text-muted">关闭后所有 AI 功能隐藏，记账/统计等核心功能不受影响，可全程人工操作。</div>
+          <div className="flex items-center gap-1.5 font-semibold">
+            启用 AI 助手
+            <Hint text="关闭后所有 AI 功能隐藏，记账/统计等核心功能不受影响，可全程人工操作。" />
           </div>
           <Switch checked={enabled} onChange={setEnabled} />
         </div>
       </div>
 
-      <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-4 text-sm leading-relaxed">
-        <p className="font-semibold text-amber-600 dark:text-amber-400">🔒 隐私与安全说明</p>
-        <ul className="mt-1 list-disc space-y-1 pl-4 text-xs text-muted">
+      {/* 隐私说明默认折叠（用户反馈：整块文字影响页面美观），核心结论在摘要行可见，点击展开详情 */}
+      <details className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-4 text-sm leading-relaxed">
+        <summary className="flex cursor-pointer list-none flex-wrap items-center gap-2 font-semibold text-amber-600 dark:text-amber-400 [&::-webkit-details-marker]:hidden">
+          🔒 隐私与安全
+          <span className="text-xs font-normal text-muted">API Key 仅存本机并加密 · 默认只发送统计汇总，不上传明细 · 点击展开详情</span>
+        </summary>
+        <ul className="mt-2 list-disc space-y-1 pl-4 text-xs text-muted">
           <li>API Key 仅保存在<b>本机</b>，不会上传到任何服务器，也不会出现在日志或对话内容中。</li>
           <li>API Key 以 AES-256-GCM 加密后存储，加密密钥仅在<b>本次会话</b>内存中存在（关闭窗口即清除）。</li>
           <li>AI 请求只会发送到你配置的接口地址，除此之外不会把数据发给任何第三方。</li>
@@ -404,13 +430,13 @@ export default function AISetting() {
           <li>关闭 AI 或未配置时，所有原有功能（人工记账、导入、统计、预算、资金去向等）完全可用。</li>
           <li><strong>本地工具数据不受 AI 安全策略影响</strong>：你在本地看到的分类、账户、标签、图表与资金去向明细均为<b>完整原始数据</b>；「AI 安全防护（脱敏/隐私）」只针对<b>上传到云端由 AI 分析</b>的内容，两条路线完全分离。</li>
         </ul>
-      </div>
+      </details>
 
       <div className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-4">
         <div className="flex items-center justify-between">
-          <div>
-            <div className="font-semibold">允许发送明细数据</div>
-            <div className="text-xs text-muted">开启后 AI 可参考交易明细；备注会经过强制脱敏（手机号/证件/银行卡/邮箱/地址等以 ⚫ 遮罩）后才上传。默认关闭以保护隐私。</div>
+          <div className="flex items-center gap-1.5 font-semibold">
+            允许发送明细数据
+            <Hint text="开启后 AI 可参考交易明细；备注会经过强制脱敏（手机号/证件/银行卡/邮箱/地址等以 ⚫ 遮罩）后才上传。默认关闭以保护隐私。" />
           </div>
           <Switch checked={allowDetail} onChange={setAllowDetail} />
         </div>
@@ -418,12 +444,17 @@ export default function AISetting() {
 
       {/* ===== 推理参数（全局） ===== */}
       <div className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-4">
-        <div className="text-sm font-semibold">推理参数（全局）</div>
-        <div className="mb-3 text-xs text-muted">随每次对话/补全请求发送到服务商；留空项交由服务端默认。更改即时生效并保存在本机。</div>
+        <div className="mb-3 flex items-center gap-1.5 text-sm font-semibold">
+          推理参数（全局）
+          <Hint text="随每次对话/补全请求发送到服务商；留空项交由服务端默认。更改即时生效并保存在本机。" />
+        </div>
         <div className="space-y-4">
           <div>
             <div className="mb-1 flex items-center justify-between text-sm">
-              <span>Temperature（温度）</span>
+              <span className="flex items-center gap-1.5">
+                Temperature（温度）
+                <Hint text="越高越发散，越低越确定。推荐 0.3~0.7。" />
+              </span>
               <span className="text-xs text-muted">{temperature.toFixed(2)}</span>
             </div>
             <input
@@ -435,12 +466,14 @@ export default function AISetting() {
               onChange={(e) => setAiParams({ temperature: Number(e.target.value) })}
               className="w-full"
             />
-            <p className="mt-0.5 text-xs text-muted">越高越发散，越低越确定。推荐 0.3~0.7。</p>
           </div>
 
           <div>
             <div className="mb-1 flex items-center justify-between text-sm">
-              <span>Top-P（核采样）</span>
+              <span className="flex items-center gap-1.5">
+                Top-P（核采样）
+                <Hint text="与 Temperature 二选一调整即可，一般将其设为服务端默认。" />
+              </span>
               <span className="text-xs text-muted">{topP == null ? '服务端默认' : topP.toFixed(2)}</span>
             </div>
             <input
@@ -452,11 +485,13 @@ export default function AISetting() {
               onChange={(e) => setAiParams({ topP: Number(e.target.value) })}
               className="w-full"
             />
-            <p className="mt-0.5 text-xs text-muted">与 temperature 二选一调整即可，一般将其设为服务端默认。</p>
           </div>
 
           <div>
-            <label className="mb-1 block text-sm">Max Tokens（单次最大输出）</label>
+            <label className="mb-1 flex items-center gap-1.5 text-sm">
+              Max Tokens（单次最大输出）
+              <Hint text="限制模型单次生成的 token 数；留空使用服务端默认上限。" />
+            </label>
             <Input
               type="number"
               min={1}
@@ -465,7 +500,6 @@ export default function AISetting() {
               onChange={(e) => setAiParams({ maxTokens: e.target.value === '' ? null : Number(e.target.value) })}
               className="w-48"
             />
-            <p className="mt-0.5 text-xs text-muted">限制模型单次生成的 token 数；留空使用服务端默认上限。</p>
           </div>
         </div>
       </div>
@@ -473,13 +507,9 @@ export default function AISetting() {
       {/* ===== 凭证目录 ===== */}
       <div className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-4">
         <div className="mb-2 flex items-center justify-between">
-          <div>
-            <div className="text-sm font-semibold">凭证目录（多模型切换）</div>
-            <div className="text-xs text-muted">每条凭证独立保存；切换模型只需改「当前」指针，历史凭证完整保留、随时可切回。激活中的凭证需先切换可删除。</div>
-            <div className="mt-1 flex items-start gap-1.5 text-xs text-muted">
-              <span>💡</span>
-              <span>添加流程建议：填写接口地址与 API Key → 自动获取模型列表（可再点「刷新模型」，也可手动输入模型名）→ 点「测试连接」确认可用 → 最后点「保存」落库。</span>
-            </div>
+          <div className="flex items-center gap-1.5 text-sm font-semibold">
+            凭证目录（多模型切换）
+            <Hint text="每条凭证独立保存；切换模型只需改「当前」指针，历史凭证完整保留、随时可切回。激活中的凭证需先切换可删除。添加流程建议：填写接口地址与 API Key → 获取模型列表 → 测试连接 → 保存落库。" />
           </div>
           <div className="flex items-center gap-2">
             <div className="w-40">
@@ -612,18 +642,25 @@ export default function AISetting() {
 
             {/* 显示名称（同一服务商可建多条凭证时用于区分） */}
             <div>
-              <label className="mb-1 block text-sm font-medium">凭证显示名称</label>
+              <label className="mb-1 flex items-center gap-1.5 text-sm font-medium">
+                凭证显示名称
+                <Hint text="用于在凭证目录中区分同服务商的多条配置，仅本地展示。" />
+              </label>
               <Input
                 value={displayNameInput}
                 onChange={(e) => setDisplayNameInput(e.target.value)}
                 placeholder="例：DeepSeek Flash"
               />
-              <p className="mt-1 text-xs text-muted">用于在凭证目录中区分同服务商的多条配置，仅本地展示。</p>
             </div>
 
             {/* Base URL */}
             <div>
-              <label className="mb-1 block text-sm font-medium">接口地址（Base URL）</label>
+              <label className="mb-1 flex items-center gap-1.5 text-sm font-medium">
+                接口地址（Base URL）
+                {baseUrlVariants.length > 1 && (
+                  <Hint text="选择兼容形态会自动填充对应地址，仍可手动修改。" />
+                )}
+              </label>
               {baseUrlVariants.length > 1 && (
                 <div className="mb-1.5">
                   <div className="w-full">
@@ -636,7 +673,6 @@ export default function AISetting() {
                       options={variantOptions}
                     />
                   </div>
-                  <p className="mt-1 text-xs text-muted">选择兼容形态会自动填充对应地址，仍可手动修改。</p>
                 </div>
               )}
               <Input value={baseURL} onChange={(e) => setBaseURL(e.target.value)} placeholder="https://api.deepseek.com" />
@@ -667,9 +703,9 @@ export default function AISetting() {
 
             {/* 模型选择 */}
             <div>
-              <label className="mb-1 block text-sm font-medium">
+              <label className="mb-1 flex items-center gap-1.5 text-sm font-medium">
                 模型
-                <span className="ml-1 text-xs text-muted">（可从下拉点选，也可手动输入列表外的模型名）</span>
+                <Hint text="可从下拉点选，也可手动输入列表外的模型名。" />
               </label>
               <div className="flex gap-2">
                 <div className="flex-1">
@@ -700,14 +736,11 @@ export default function AISetting() {
         </Modal>
       )}
 
-      {/* 余额面板仅 DeepSeek 提供；云端参考文档已并入下方统一的「知识库」区块 */}
+      {/* 余额面板仅 DeepSeek 提供（DeepSeek 独有 /user/balance 接口，属真实能力差异） */}
       {isDeepSeek && <DeepSeekBalancePanel />}
 
-      {/* ===== 知识库：本地参考规则（全服务商）+ 云端参考文档（仅 DeepSeek） ===== */}
-      <KnowledgePanel
-        isDeepSeek={isDeepSeek}
-        providerName={activeProvider?.displayName || activeProvider?.name || ''}
-      />
+      {/* ===== 知识库：参考知识与规则（本地文档统一，全服务商生效） ===== */}
+      <KnowledgePanel />
 
       <div className="flex items-center gap-2">
         <Button
@@ -744,6 +777,8 @@ export default function AISetting() {
             variant="danger"
             size="sm"
             onClick={() => {
+              // 不保存：若这是新增后从未保存过的草稿，一并从目录移除（否则会残留空壳）
+              discardDraftIfNeeded();
               setCloseConfirmOpen(false);
               setEditOpen(false);
             }}
@@ -798,9 +833,9 @@ function DeepSeekBalancePanel() {
   return (
     <div className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-4">
       <div className="mb-2 flex items-center justify-between">
-        <div>
-          <div className="text-sm font-semibold">账户余额</div>
-          <div className="text-xs text-muted">查询 DeepSeek 账号剩余额度（GET /user/balance），仅本机请求、不存储结果。</div>
+        <div className="flex items-center gap-1.5 text-sm font-semibold">
+          账户余额
+          <Hint text="查询 DeepSeek 账号剩余额度（GET /user/balance），仅本机请求、不存储结果。" />
         </div>
         <Button size="sm" variant="outline" onClick={onLoad} disabled={loading}>
           {loading ? '查询中…' : '查询余额'}
@@ -825,101 +860,13 @@ function DeepSeekBalancePanel() {
 }
 
 /**
- * DeepSeek 云端参考文档面板（嵌入统一「知识库」区块）：GET /files 真实读取、上传、删除，无模拟数据。
+ * 知识库（统一区块）：AI 分析的统一参考资料入口。
+ * 设计（用户确认的「本地文档统一」方案）：所有参考内容都保存在本机，调用 AI 时随请求
+ * 发送给当前生效的服务商——对 DeepSeek / OpenAI / 通义 / 智谱 / Ollama 等全部服务商一致生效，
+ * 不再存在「云端参考文档仅 DeepSeek 可用」的限制（原 DeepSeek /files 面板已移除）。
+ * 录入方式：① 手动添加/编辑文本条目；② 导入本地文档（txt / md / csv 等纯文本文件）。
  */
-function DeepSeekFilesPanel() {
-  const [files, setFiles] = useState<DeepSeekFile[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [uploading, setUploading] = useState(false);
-  const [err, setErr] = useState('');
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  async function load() {
-    setLoading(true);
-    setErr('');
-    try {
-      const list = await listFiles();
-      setFiles(list);
-    } catch (e) {
-      setErr((e as Error).message);
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function onPickFile(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    e.target.value = '';
-    if (!file) return;
-    setUploading(true);
-    setErr('');
-    try {
-      await uploadFile(file, file.name);
-      toast.success(`已上传「${file.name}」`);
-      await load();
-    } catch (ex) {
-      setErr((ex as Error).message);
-      toast.error((ex as Error).message);
-    } finally {
-      setUploading(false);
-    }
-  }
-
-  async function onDelete(f: DeepSeekFile) {
-    try {
-      const ok = await deleteFile(f.id);
-      if (ok) {
-        toast.success(`已删除「${f.filename}」`);
-        setFiles((prev) => prev.filter((x) => x.id !== f.id));
-      } else {
-        toast.error('删除失败');
-      }
-    } catch (ex) {
-      toast.error((ex as Error).message);
-    }
-  }
-
-  const fmtBytes = (n: number) => (n >= 1048576 ? `${(n / 1048576).toFixed(2)} MB` : `${Math.max(0, Math.round(n / 1024))} KB`);
-
-  return (
-    <div>
-      <div className="mb-2 flex items-center justify-between gap-2">
-        <div className="text-xs text-muted">上传到 DeepSeek 云端（/files）的文档，作为 AI 分析的可选参考资料。</div>
-        <div className="flex items-center gap-2">
-          <Button size="sm" variant="outline" onClick={load} disabled={loading}>
-            {loading ? '加载中…' : '刷新列表'}
-          </Button>
-          <input ref={inputRef} type="file" hidden onChange={onPickFile} />
-          <Button size="sm" onClick={() => inputRef.current?.click()} disabled={uploading}>
-            {uploading ? '上传中…' : '上传文档'}
-          </Button>
-        </div>
-      </div>
-      {err && <p className="mb-2 text-sm" style={{ color: 'var(--color-danger)' }}>{err}</p>}
-      {files.length === 0 ? (
-        <p className="py-4 text-center text-xs text-muted">暂无文件。可上传参考文档作为 AI 分析的知识依据。</p>
-      ) : (
-        <ul className="divide-y divide-[var(--border)]">
-          {files.map((f) => (
-            <li key={f.id} className="flex items-center gap-2 py-2 text-sm">
-              <span className="min-w-0 flex-1 truncate">{f.filename}</span>
-              <span className="text-xs text-muted">{fmtBytes(f.bytes)}</span>
-              <span className="text-xs text-muted">{f.status ?? ''}</span>
-              <Button size="sm" variant="danger" onClick={() => onDelete(f)}>删除</Button>
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  );
-}
-
-/**
- * 知识库（统一区块）：合并原「参考文档（DeepSeek 云端文件）」与「参考规则（本地文本条目）」，
- * 两者都是 AI 分析的参考资料，此前分散为两个区块易被误认为重复功能、也难以判断哪个在生效。
- * 现按「本地参考规则（所有服务商生效）」+「云端参考文档（仅 DeepSeek 凭证）」在同一卡片内分节展示。
- */
-function KnowledgePanel({ isDeepSeek, providerName }: { isDeepSeek: boolean; providerName: string }) {
+function KnowledgePanel() {
   const entries = useKnowledgeStore((s) => s.entries);
   const add = useKnowledgeStore((s) => s.add);
   const update = useKnowledgeStore((s) => s.update);
@@ -930,6 +877,13 @@ function KnowledgePanel({ isDeepSeek, providerName }: { isDeepSeek: boolean; pro
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editTitle, setEditTitle] = useState('');
   const [editContent, setEditContent] = useState('');
+  const [importing, setImporting] = useState(false);
+  const docInputRef = useRef<HTMLInputElement>(null);
+
+  /** 允许导入的纯文本扩展名（不做 PDF/Word 二进制解析：易出错且需额外重依赖） */
+  const DOC_EXT = ['txt', 'md', 'markdown', 'csv', 'json', 'log', 'yaml', 'yml', 'ini'];
+  /** 单条知识内容上限（字符数）：超出即截断，避免超大文档撑爆 prompt、无谓消耗 Token */
+  const DOC_MAX_CHARS = 50000;
 
   function onAdd() {
     if (!title.trim() && !content.trim()) {
@@ -940,6 +894,54 @@ function KnowledgePanel({ isDeepSeek, providerName }: { isDeepSeek: boolean; pro
     setTitle('');
     setContent('');
     toast.success('已添加知识条目，写入后将随 AI 请求参与上下文');
+  }
+
+  /**
+   * 导入本地文档：读取纯文本文件内容作为知识条目（存本机 settings 表，随 AI 请求发送）。
+   * 全部服务商一致生效——注入逻辑在 llm.ts 的 knowledgeBlock()，与凭证服务商无关。
+   * 校验：① 扩展名白名单，拒收其它类型（含二进制）；② 内容含 NUL 视为二进制拒收；
+   * ③ 超长截断至 DOC_MAX_CHARS 并汇总提示，避免用户无感知地送出超大上下文。
+   */
+  async function onImportDocs(e: React.ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(e.target.files ?? []);
+    e.target.value = '';
+    if (!files.length) return;
+    setImporting(true);
+    let okCount = 0;
+    let truncatedCount = 0;
+    const failed: string[] = [];
+    for (const f of files) {
+      const ext = f.name.split('.').pop()?.toLowerCase() ?? '';
+      if (!DOC_EXT.includes(ext)) {
+        failed.push(`${f.name}（仅支持 ${DOC_EXT.join('/')} 纯文本）`);
+        continue;
+      }
+      try {
+        const text = await f.text();
+        if (text.includes('\u0000')) {
+          failed.push(`${f.name}（疑似二进制文件）`);
+          continue;
+        }
+        const body = text.trim();
+        if (!body) {
+          failed.push(`${f.name}（内容为空）`);
+          continue;
+        }
+        const clipped = body.length > DOC_MAX_CHARS;
+        if (clipped) truncatedCount++;
+        add({ title: f.name, content: clipped ? body.slice(0, DOC_MAX_CHARS) : body });
+        okCount++;
+      } catch {
+        failed.push(`${f.name}（读取失败）`);
+      }
+    }
+    setImporting(false);
+    if (okCount) {
+      toast.success(
+        `已导入 ${okCount} 个文档${truncatedCount ? `（其中 ${truncatedCount} 个超长已截断至 ${DOC_MAX_CHARS} 字符）` : ''}`
+      );
+    }
+    if (failed.length) toast.error(`未导入：${failed.join('；')}`);
   }
 
   function startEdit(e: KnowledgeEntry) {
@@ -960,17 +962,30 @@ function KnowledgePanel({ isDeepSeek, providerName }: { isDeepSeek: boolean; pro
 
   return (
     <div className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-4">
-      <div className="mb-3">
-        <div className="text-sm font-semibold">知识库</div>
-        <div className="text-xs text-muted">
-          AI 分析的统一参考资料入口：本地参考规则对所有服务商生效；云端参考文档仅 DeepSeek 凭证可用。
+      <div className="mb-3 flex items-start justify-between gap-3">
+        <div className="flex items-center gap-1.5 text-sm font-semibold">
+          知识库
+          <Hint text="参考资料仅保存在本机，调用 AI 时随请求发送给当前生效的服务商——对全部服务商一致生效。" />
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          <input
+            ref={docInputRef}
+            type="file"
+            hidden
+            multiple
+            accept=".txt,.md,.markdown,.csv,.json,.log,.yaml,.yml,.ini"
+            onChange={onImportDocs}
+          />
+          <Button size="sm" variant="outline" onClick={() => docInputRef.current?.click()} disabled={importing}>
+            {importing ? '导入中…' : '导入文档'}
+          </Button>
         </div>
       </div>
 
-      {/* ---- 本地参考规则（全服务商） ---- */}
-      <div className="mb-2 text-sm font-medium">📝 本地参考规则（接入 AI 上下文 · 全服务商生效）</div>
-      <div className="mb-2 text-xs text-muted">
-        保存若干「规则 / 参考文档」文本，会在 AI 对话时拼入系统提示，作为分析的参考资料。仅本地存储，随请求发送到当前激活的服务商。
+      {/* ---- 参考知识与规则（全服务商） ---- */}
+      <div className="mb-3 flex items-center gap-1.5 text-sm font-medium">
+        📝 参考知识与规则
+        <Hint text="可手动添加规则，或点右上角「导入文档」导入 txt / md / csv 等纯文本文件；内容会在 AI 对话时拼入系统提示。对全部服务商生效。" />
       </div>
 
       {/* 新增 */}
@@ -1027,19 +1042,6 @@ function KnowledgePanel({ isDeepSeek, providerName }: { isDeepSeek: boolean; pro
               </li>
             ))}
           </ul>
-        )}
-      </div>
-
-      {/* ---- 云端参考文档（仅 DeepSeek）：非 DeepSeek 时给出明确说明而非直接隐藏，避免"有时有有时无"的困惑 ---- */}
-      <div className="mt-4 border-t border-[var(--border)] pt-3">
-        <div className="mb-2 text-sm font-medium">📄 云端参考文档（仅 DeepSeek 凭证）</div>
-        {isDeepSeek ? (
-          <DeepSeekFilesPanel />
-        ) : (
-          <p className="text-xs text-muted">
-            云端文档上传仅支持 DeepSeek 凭证（/files 接口）；当前生效凭证为「{providerName || '自定义服务商'}」，不支持文件接口。
-            请使用上方的「本地参考规则」——它对所有服务商生效。
-          </p>
         )}
       </div>
     </div>

@@ -12,6 +12,7 @@ import { isZip, tryExtractZip, detectZipEncryption } from '@/api/importZip';
 import { recordImportLog, listImportLogs, type ImportLog } from '@/api/importLog';
 import { suggestForText } from '@/api/aiSuggest';
 import { Button } from '@/components/ui/button';
+import { Hint } from '@/components/ui/hint';
 import { Modal } from '@/components/ui/modal';
 import { formatMoney } from '@/lib/format';
 
@@ -499,12 +500,13 @@ export default function ImportManage() {
   return (
     <div className="space-y-4">
       <div className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-4">
-        <h3 className="mb-1 font-semibold">Excel / CSV 批量导入</h3>
-        <p className="mb-3 text-sm text-muted">
-          支持 .xlsx / .xls / .csv 及支付宝、微信加密账单（zip 可输入解压密码，本机解密不上传）。可一次选择多个文件。
-          下载模板填写后导入。「类型」填写 <code>收入 / 支出 / 转账</code>，
-          「账户」按名称匹配当前账本；缺失的账户与分类可自动创建。
-          <span className="text-[var(--color-warning,#F59E0B)]"> 导入为余额中性：仅写入流水与统计，不改变账户当前余额；导入成功后会按流水自动重算账户余额（也可用「重算账户余额」手动执行）。</span>
+        <h3 className="mb-1 flex items-center gap-1.5 font-semibold">
+          Excel / CSV 批量导入
+          <Hint text="支持 .xlsx / .xls / .csv 及支付宝、微信加密账单（zip 可输入解压密码，本机解密不上传）。可一次选择多个文件；下载模板填写后导入。「类型」填 收入 / 支出 / 转账，「账户」按名称匹配当前账本，缺失的账户与分类可自动创建。" />
+        </h3>
+        {/* 余额中性是用户易踩坑的关键点，保留为一行醒目提示（不折叠） */}
+        <p className="mb-3 text-xs text-[var(--color-warning,#F59E0B)]">
+          导入为余额中性：仅写入流水与统计，不改变账户当前余额；导入成功后会按流水自动重算账户余额（也可用「重算账户余额」手动执行）。
         </p>
         <div className="flex flex-wrap items-center gap-3">
           <Button variant="outline" size="sm" onClick={downloadTemplate}>下载模板</Button>
@@ -560,8 +562,7 @@ export default function ImportManage() {
           {rulesOpen && (
             <div className="mt-2 space-y-2">
               <div className="text-xs text-muted">
-                命中关键词（包含匹配）时按此规则判定资金流向，优先级高于内置识别（还款/退款/提现/收支方向）。
-                可用于把某商家或某说明文本固定归到某类型、某账户或某分类，避免每次导入都手工纠正。
+                命中关键词（包含匹配）时按此规则判定资金流向，优先级高于内置识别（还款/退款/提现/收支方向）；可把某商家或某说明文本固定归到某类型、某账户或某分类。
               </div>
               {rules.length === 0 && <div className="text-xs text-muted">暂无规则，点「添加规则」新建。</div>}
               {rules.map((r, i) => (

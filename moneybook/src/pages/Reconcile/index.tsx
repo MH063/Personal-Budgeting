@@ -6,6 +6,7 @@ import { PageHeader } from '@/components/common/PageHeader';
 import { EmptyState } from '@/components/common/EmptyState';
 import { ConfirmDialog } from '@/components/common/ConfirmDialog';
 import { Button } from '@/components/ui/button';
+import { Hint } from '@/components/ui/hint';
 import { Input } from '@/components/ui/input';
 import { DataTable } from '@/components/data-table/DataTable';
 import { useAccounts } from '@/hooks/useAccounts';
@@ -408,12 +409,10 @@ function MatchView({ batch, onBack, onLocked }: { batch: ReconRow; onBack: () =>
       {/* 本地有·银行无：期间内未被任何流水匹配的本地交易（双向核对，带分页） */}
       {localTotal > 0 && (
         <div className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-5">
-          <h3 className="mb-3 font-semibold" style={{ color: 'var(--color-danger)' }}>
+          <h3 className="mb-3 flex items-center gap-1.5 font-semibold" style={{ color: 'var(--color-danger)' }}>
             本地有·银行无（{localTotal}）
+            <Hint text="这些本地交易在对账期间内，但银行流水中没有对应记录——请确认是否漏记、记错账户或属于其他期间。" />
           </h3>
-          <p className="mb-2 text-xs text-muted">
-            这些本地交易在对账期间内，但银行流水中没有对应记录——请确认是否漏记、记错账户或属于其他期间。
-          </p>
           {diff?.localUnmatched && diff.localUnmatched.length > 0 ? (
             <>
               <ul className="space-y-1.5 text-sm">

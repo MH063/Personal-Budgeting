@@ -47,8 +47,6 @@ export const DIM_KEY = 'kv.stats.dim';
 export const DEVICE_TOKEN_KEY = 'kv.enc.device';
 /** 存储管理：文件默认保存目录（备份文件导出对话框的默认前缀；空=系统默认） */
 export const STORAGE_SAVE_DIR_KEY = 'kv.storage.save_dir';
-/** 关于页：GitHub 仓库（owner/repo），用于检查更新（读取 Releases 最新版本） */
-export const UPDATE_REPO_KEY = 'kv.update.repo';
 
 // 内置图标库，供用户为分类/账户/储蓄目标等选择图标
 export const ICON_PALETTE = [

@@ -38,12 +38,11 @@ struct TxConn {
 pub struct TxState(Mutex<Option<TxConn>>);
 
 /// 定位与插件同一份数据库文件。
-/// 说明：插件内部用 app_config_dir()，而 Windows 上 app_config_dir 与 app_data_dir
-/// 同为 %APPDATA%\<identifier>；此处沿用既有 get_db_path 的 app_data_dir，
-/// 与备份/恢复命令保持一致。
+/// 说明：路径取自启动时的数据目录决策结果（datadir::DbLocation）——插件连接、
+/// 本事务连接、自检/备份/存储统计全部指向同一份文件；便携模式切换后也不会错位。
 fn db_file(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
-    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    Ok(dir.join("moneybook.db"))
+    let loc = app.state::<crate::datadir::DbLocation>();
+    Ok(loc.file.clone())
 }
 
 /// JSON 参数 → rusqlite 绑定值
@@ -84,7 +83,9 @@ fn exec_one(conn: &mut Connection, sql: &str, params: &[JsonValue]) -> Result<Tx
 }
 
 /// 在【同一条连接】上原子执行一批语句：任一步失败则整体回滚。
-/// 抽成独立函数便于用内存库单测验证原子性。
+/// 抽成独立函数便于用内存库单测验证原子性（生产路径为 tx_execute 分步 + commit/rollback，
+/// 故此函数仅在测试构建中存在，避免 dead_code 警告）。
+#[cfg(test)]
 pub fn exec_batch_atomic(
     conn: &mut Connection,
     stmts: &[(String, Vec<JsonValue>)],

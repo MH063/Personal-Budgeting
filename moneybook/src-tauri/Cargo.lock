@@ -2417,7 +2417,7 @@ dependencies = [
 
 [[package]]
 name = "moneybook"
-version = "2.0.0"
+version = "1.0.0"
 dependencies = [
  "rusqlite",
  "serde",
@@ -2429,6 +2429,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-fs",
  "tauri-plugin-http",
+ "tauri-plugin-process",
  "tauri-plugin-sql",
  "tauri-plugin-updater",
 ]
@@ -4815,6 +4816,16 @@ dependencies = [
  "tokio",
  "url",
  "urlpattern 0.3.0",
+]
+
+[[package]]
+name = "tauri-plugin-process"
+version = "2.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "74ae3d8549ae564c0397377373e262f340908eb23a5b9fbe03f2a00007dc0038"
+dependencies = [
+ "tauri",
+ "tauri-plugin",
 ]
 
 [[package]]

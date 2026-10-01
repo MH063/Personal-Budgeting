@@ -1,6 +1,6 @@
 [package]
 name = "moneybook"
-version = "2.0.0"
+version = "1.0.0"
 description = "个人记账桌面工具"
 edition = "2021"
 
@@ -18,6 +18,8 @@ tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
 tauri-plugin-clipboard-manager = "2"
 tauri-plugin-updater = "2"
+# 应用内更新安装完成后由前端调用 relaunch() 重启进程进入新版本
+tauri-plugin-process = "2"
 # HTTP 插件：AI 助手等外部接口请求改由 Rust 侧发出，绕过 WebView 的 CORS/CSP 限制
 tauri-plugin-http = "2"
 serde = { version = "1", features = ["derive"] }

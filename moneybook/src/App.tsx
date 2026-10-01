@@ -10,6 +10,8 @@ import { hydrateKV, getKV } from '@/api/kv';
 import { THEME_KEY } from '@/lib/constants';
 import { useAIStore } from '@/stores/useAIStore';
 import { useKnowledgeStore } from '@/stores/useKnowledgeStore';
+import { useUpdateStore } from '@/stores/useUpdateStore';
+import { UpdateDialog } from '@/components/common/UpdateDialog';
 
 const TransactionsPage = lazy(() => import('@/pages/Transactions/TransactionsPage'));
 const SavingsPage = lazy(() => import('@/pages/Savings/SavingsPage'));
@@ -54,6 +56,12 @@ export default function App() {
       useKnowledgeStore.getState().hydrate();
       // 应用启动即运行"自动任务"（周期性记账/储蓄计提/逾期利息累计），与页面访问解耦
       runStartupTasks();
+      // 启动自动扫描新版本：延迟 3 秒避让首屏渲染与启动任务；
+      // 内部有 24h 节流（kv.update.lastCheck）与「已跳过版本」过滤，
+      // 仅在发现更新时弹出确认弹窗（立即更新 / 稍后提醒 / 跳过此版本），绝不静默安装。
+      window.setTimeout(() => {
+        if (!cancelled) void useUpdateStore.getState().checkSilently();
+      }, 3000);
     })();
     return () => {
       cancelled = true;
@@ -64,6 +72,7 @@ export default function App() {
     <HashRouter>
       <LedgerInit />
       <OnboardingModal />
+      <UpdateDialog />
       <Suspense fallback={<PageFallback />}>
         <Routes>
           <Route element={<AppShell />}>
