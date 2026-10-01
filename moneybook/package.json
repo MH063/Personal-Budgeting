@@ -1,7 +1,7 @@
 {
   "name": "moneybook",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.0.1",
   "build": 0,
   "channel": "stable",
   "type": "module",
