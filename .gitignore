@@ -1,0 +1,23 @@
+# 依赖与构建产物（可从源码重建，不入库）
+moneybook/node_modules/
+moneybook/dist/
+moneybook/src-tauri/target/
+moneybook/src-tauri/gen/
+
+# 编辑器与工具目录
+.trae/
+.vscode/
+.idea/
+
+# 上传与测试临时目录
+.uploads/
+.uploads_test/
+
+# 遗留的大模型副本（应用仅从 moneybook/public/paddle 加载模型，根目录副本不参与运行）
+ch_PP-OCRv4_rec_infer.onnx
+
+# 系统与日志文件
+Thumbs.db
+Desktop.ini
+.DS_Store
+*.log

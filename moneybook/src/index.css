@@ -1,0 +1,61 @@
+@import "tailwindcss";
+
+@theme {
+  --color-primary: #1e6fa9;
+  --color-primary-foreground: #ffffff;
+  --color-primary-fg: #1e6fa9;
+  --color-success: #10b981;
+  --color-danger: #ef4444;
+  --color-warning: #f59e0b;
+  --radius-card: 12px;
+  --radius-btn: 8px;
+}
+
+:root {
+  color-scheme: light;
+  --bg: #f8fafc;
+  --fg: #0f172a;
+  --card: #ffffff;
+  --muted: #64748b;
+  --border: #e2e8f0;
+  --danger: #ef4444;
+}
+
+.dark {
+  color-scheme: dark;
+  --bg: #0f172a;
+  --fg: #f1f5f9;
+  --card: #1e293b;
+  --muted: #94a3b8;
+  --border: #334155;
+  /* 暗色下主色文字前景换成更亮的主题蓝，规避深蓝在深底上对比度不足导致看不清 */
+  --color-primary-fg: #6fc0f0;
+}
+
+* { box-sizing: border-box; }
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  font-family: Inter, system-ui, "Microsoft YaHei", sans-serif;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+body {
+  overflow: hidden;
+  user-select: none;
+}
+
+input, textarea { user-select: text; }
+
+/* 工具类：弥补 Tailwind v4 中未定义的语义类 */
+.text-muted { color: var(--muted); }
+.text-danger { color: var(--danger); }
+
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+.dark ::-webkit-scrollbar-thumb { background: #475569; }
+.dark ::-webkit-scrollbar-thumb:hover { background: #64748b; }

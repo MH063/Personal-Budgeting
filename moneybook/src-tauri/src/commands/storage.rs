@@ -1,0 +1,224 @@
+// 存储管理：应用数据占用 / 磁盘空间占比 / 缓存清理 / 打开目录
+//
+// 背景：设置页需要「存储管理」——查看应用占用了多少空间、电脑磁盘的占用情况，
+// 并清理可安全删除的残留文件（损坏库隔离文件、中断遗留的临时文件）。
+// 设计：
+//   - 磁盘空间零依赖获取：Windows 直接调用 kernel32!GetDiskFreeSpaceExW（FFI），
+//     避免为一个查询引入 sysinfo 等新依赖（本机桌面版仅需 Windows 实现）。
+//   - 「缓存」定义收窄为真正可弃文件：moneybook.db.corrupt.<ts>（损坏隔离留档）、
+//     *.tmp（快照/写入中断残留）；主库、-wal/-shm 伴随文件、.bak 快照一律不碰。
+use serde::Serialize;
+use tauri::Manager;
+
+/// 存储概览（一次性返回应用占用 + 磁盘空间，前端据此画占比条）
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageOverview {
+    /// 应用数据目录绝对路径
+    pub app_dir: String,
+    /// 主库 moneybook.db 字节数
+    pub db_size: u64,
+    /// 预写日志 moneybook.db-wal 字节数
+    pub wal_size: u64,
+    /// 安全快照 moneybook.db.bak 字节数
+    pub bak_size: u64,
+    /// 可清理缓存字节数（.corrupt.* 与 *.tmp 之和）
+    pub cache_size: u64,
+    /// 应用数据目录下全部文件总字节数
+    pub app_total: u64,
+    /// 所在磁盘总容量（非 Windows 或查询失败为 0）
+    pub disk_total: u64,
+    /// 所在磁盘已用容量
+    pub disk_used: u64,
+    /// 所在磁盘可用容量
+    pub disk_free: u64,
+}
+
+/// Windows 磁盘空间 FFI（kernel32）
+#[cfg(windows)]
+mod win_disk {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetDiskFreeSpaceExW(
+            lp_directory_name: *const u16,
+            lp_free_bytes_available_to_caller: *mut u64,
+            lp_total_number_of_bytes: *mut u64,
+            lp_total_number_of_free_bytes: *mut u64,
+        ) -> i32;
+    }
+
+    /// 查询路径所在磁盘的 (总容量, 已用, 可用)；失败返回 None
+    pub fn disk_space(dir: &std::path::Path) -> Option<(u64, u64, u64)> {
+        use std::os::windows::ffi::OsStrExt;
+        // API 要求 NUL 结尾的宽字符串
+        let mut wide: Vec<u16> = dir.as_os_str().encode_wide().collect();
+        wide.push(0);
+        let mut free_to_caller = 0u64;
+        let mut total = 0u64;
+        let mut free_total = 0u64;
+        let ok = unsafe {
+            GetDiskFreeSpaceExW(
+                wide.as_ptr(),
+                &mut free_to_caller,
+                &mut total,
+                &mut free_total,
+            )
+        };
+        if ok == 0 {
+            None
+        } else {
+            Some((total, total.saturating_sub(free_total), free_total))
+        }
+    }
+}
+
+/// 查询路径所在磁盘 (总, 已用, 可用)；非 Windows 或失败返回全 0（前端提示不支持）
+fn disk_space_of(dir: &std::path::Path) -> (u64, u64, u64) {
+    #[cfg(windows)]
+    {
+        if let Some(v) = win_disk::disk_space(dir) {
+            return v;
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = dir;
+    (0, 0, 0)
+}
+
+/// 计算单个文件字节数（不存在或读取失败记 0）
+fn file_size(path: &std::path::Path) -> u64 {
+    std::fs::metadata(path)
+        .map(|m| if m.is_file() { m.len() } else { 0 })
+        .unwrap_or(0)
+}
+
+/// 递归求目录下所有文件总字节数（读取失败的条目跳过）
+fn dir_total_size(dir: &std::path::Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut total = 0u64;
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            total = total.saturating_add(dir_total_size(&p));
+        } else {
+            total = total.saturating_add(e.metadata().map(|m| m.len()).unwrap_or(0));
+        }
+    }
+    total
+}
+
+/// 是否为可安全清理的缓存文件。
+/// 收窄定义：只认「历史损坏隔离留档」(.corrupt.*) 与「中断遗留临时文件」(*.tmp)；
+/// 主库、-wal/-shm 伴随文件、.bak 快照绝不匹配（避免误删唯一可用数据）。
+fn is_cache_file(name: &str) -> bool {
+    name.contains(".corrupt.") || name.ends_with(".tmp")
+}
+
+/// 统计目录下可清理缓存字节数
+fn cache_size(dir: &std::path::Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter(|e| {
+            e.file_type().map(|t| t.is_file()).unwrap_or(false)
+                && is_cache_file(&e.file_name().to_string_lossy())
+        })
+        .map(|e| e.metadata().map(|m| m.len()).unwrap_or(0))
+        .sum()
+}
+
+/// 计算 SQLite 伴随文件路径：moneybook.db → moneybook.db-wal / moneybook.db.bak
+fn sidecar(db: &std::path::Path, suffix: &str) -> std::path::PathBuf {
+    let mut p = db.as_os_str().to_owned();
+    p.push(suffix);
+    std::path::PathBuf::from(p)
+}
+
+/// 获取存储概览：应用数据占用明细 + 磁盘总/已用/可用
+#[tauri::command]
+pub fn get_storage_overview(app: tauri::AppHandle) -> Result<StorageOverview, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let db = dir.join("moneybook.db");
+    let (disk_total, disk_used, disk_free) = disk_space_of(&dir);
+    Ok(StorageOverview {
+        app_dir: dir.to_string_lossy().to_string(),
+        db_size: file_size(&db),
+        wal_size: file_size(&sidecar(&db, "-wal")),
+        bak_size: file_size(&sidecar(&db, ".bak")),
+        cache_size: cache_size(&dir),
+        app_total: dir_total_size(&dir),
+        disk_total,
+        disk_used,
+        disk_free,
+    })
+}
+
+/// 清理可安全删除的缓存文件（.corrupt.* / *.tmp），返回释放的字节数
+#[tauri::command]
+pub fn clean_storage_cache(app: tauri::AppHandle) -> Result<u64, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let entries = std::fs::read_dir(&dir).map_err(|e| e.to_string())?;
+    let mut freed = 0u64;
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        if !is_cache_file(&name) {
+            continue;
+        }
+        let path = e.path();
+        let Ok(meta) = e.metadata() else { continue };
+        if !meta.is_file() {
+            continue;
+        }
+        if std::fs::remove_file(&path).is_ok() {
+            freed = freed.saturating_add(meta.len());
+        }
+    }
+    Ok(freed)
+}
+
+/// 用系统文件管理器打开指定目录（本机桌面版；explorer 成功时返回码可能为 1，不据返回码判成败）
+#[tauri::command]
+pub fn open_folder(path: String) -> Result<(), String> {
+    let p = std::path::PathBuf::from(&path);
+    if !p.exists() {
+        return Err(format!("目录不存在：{path}"));
+    }
+    #[cfg(windows)]
+    {
+        std::process::Command::new("explorer")
+            .arg(p.as_os_str())
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = p;
+    }
+    Ok(())
+}
+
+/// 在默认浏览器中打开 https 链接（用于「关于」页跳转 GitHub Releases）。
+/// 安全约束：只放行 https://，避免经命令参数注入执行任意命令；
+/// 用 rundll32 FileProtocolHandler 直接交给 Shell 关联程序，不经过 cmd 解析（url 中的 & 等符号无注入风险）。
+#[tauri::command]
+pub fn open_url(url: String) -> Result<(), String> {
+    if !url.starts_with("https://") {
+        return Err("仅支持打开 https 链接".to_string());
+    }
+    #[cfg(windows)]
+    {
+        std::process::Command::new("rundll32.exe")
+            .args(["url.dll,FileProtocolHandler", &url])
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        Err("当前平台不支持打开外部链接".to_string())
+    }
+}
