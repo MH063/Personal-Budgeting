@@ -84,7 +84,12 @@ jobs:
         run: |
           gh release delete "${{ github.ref_name }}" --yes 2>/dev/null || echo "同名 Release 不存在，跳过清理"
 
-      - name: 构建 · 签名 · 发布 Release
+      - name: 构建 · 签名 · 上传（草稿态）
+        # 关键设计（Tauri 官方模板同款）：先以草稿（draft）创建 Release 再上传资产。
+        # 草稿态允许重复上传/修改资产，彻底规避 GitHub 对已发布 Release 的不可变
+        # 限制（"Cannot upload assets to an immutable release"——v1.0.0/v1.0.1 两次
+        # 构建均撞上：release 创建后立即上传资产偶发被判为不可变）。上传完成后由
+        # 下一步「正式发布」把草稿转公开，用户即可下载。
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -101,11 +106,24 @@ jobs:
             - 覆盖安装不会清理本机账本数据（数据保存在本机数据目录）
             - 已装用户可在应用内「设置 → 关于系统 → 检查更新」一键升级
             - 安装包已使用 minisign 签名，应用内更新会自动校验签名后再安装
-          releaseDraft: false
+          releaseDraft: true
           prerelease: false
+          # 上传偶发失败时自动重试（应对 GitHub 侧瞬时异常）
+          retryAttempts: 3
           # 更新清单 latest.json（应用内更新的数据源）由 tauri-action 默认生成并上传
           # （对应输入 includeUpdaterJson，@v0 默认 true）；不显式声明该输入，
           # 避免 dev 分支新输入名 uploadUpdaterJson 在 @v0 上触发 "Unexpected input" 告警。
           # 仅构建 Windows NSIS 安装包（本应用的一键更新主平台）；
           # 将来要发布 macOS/Linux 时，在此处改为构建矩阵并补充对应 runners 即可
           args: --bundles nsis
+
+      - name: 正式发布（草稿 → 公开）
+        # 草稿态 Release 用户不可见、也不会成为「最新版」，应用内更新读的
+        # releases/latest 拿不到它；上传全部资产（含 latest.json 与签名）后在此
+        # 转为公开，让用户可以下载、应用内更新可发现新版本。
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release edit "${{ github.ref_name }}" --draft=false
+          echo "已发布：个人记账 ${{ github.ref_name }}"
