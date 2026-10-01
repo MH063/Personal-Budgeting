@@ -72,6 +72,18 @@ jobs:
         working-directory: moneybook
         run: npm run version:sync
 
+      - name: 清理已存在的同名 Release（幂等重发）
+        # 背景：GitHub 不允许向已发布的 Release 重复上传资产（immutable），首次构建
+        # 失败或手动重跑时会残留同名 Release，导致后续上传报
+        # "Cannot upload assets to an immutable release"（本次 v1.0.0 发布即遇到）。
+        # 故每次发布前先删除同名 Release（保留 git tag），再由 tauri-action 从干净
+        # 状态重建；删除失败（release 不存在）视为正常，不阻断流程。
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete "${{ github.ref_name }}" --yes 2>/dev/null || echo "同名 Release 不存在，跳过清理"
+
       - name: 构建 · 签名 · 发布 Release
         uses: tauri-apps/tauri-action@v0
         env:
@@ -91,7 +103,9 @@ jobs:
             - 安装包已使用 minisign 签名，应用内更新会自动校验签名后再安装
           releaseDraft: false
           prerelease: false
-          uploadUpdaterJson: true # 生成并上传 latest.json（应用内更新的清单来源）
+          # 更新清单 latest.json（应用内更新的数据源）由 tauri-action 默认生成并上传
+          # （对应输入 includeUpdaterJson，@v0 默认 true）；不显式声明该输入，
+          # 避免 dev 分支新输入名 uploadUpdaterJson 在 @v0 上触发 "Unexpected input" 告警。
           # 仅构建 Windows NSIS 安装包（本应用的一键更新主平台）；
           # 将来要发布 macOS/Linux 时，在此处改为构建矩阵并补充对应 runners 即可
           args: --bundles nsis
