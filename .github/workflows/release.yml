@@ -43,10 +43,10 @@ jobs:
       contents: write # 创建 Release 与上传资产需要写权限
     steps:
       - name: 检出代码
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: 安装 Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -113,9 +113,16 @@ jobs:
           # 更新清单 latest.json（应用内更新的数据源）由 tauri-action 默认生成并上传
           # （对应输入 includeUpdaterJson，@v0 默认 true）；不显式声明该输入，
           # 避免 dev 分支新输入名 uploadUpdaterJson 在 @v0 上触发 "Unexpected input" 告警。
+          # 资产命名必须为纯 ASCII 英文：tauri-action@v0 生成 latest.json 时按
+          # 「GitHub 上已上传资产名」与「本地计算的资产名」精确匹配来收集签名文件，
+          # 中文资产名（个人记账_…exe.sig）在 GitHub 侧存储后匹配不上，会打印
+          # "Signature not found for the updater JSON" 并跳过 latest.json 上传
+          # （v1.0.2 即因此缺失更新清单）。强制英文名后上传名与匹配名一致，
+          # latest.json 正常生成；应用内更新的下载 URL 也指向该英文资产名。
           # 仅构建 Windows NSIS 安装包（本应用的一键更新主平台）；
           # 将来要发布 macOS/Linux 时，在此处改为构建矩阵并补充对应 runners 即可
           args: --bundles nsis
+          assetNamePattern: 'moneybook_[version]_[arch]-setup[ext]'
 
       - name: 正式发布（草稿 → 公开）
         # 草稿态 Release 用户不可见、也不会成为「最新版」，应用内更新读的
