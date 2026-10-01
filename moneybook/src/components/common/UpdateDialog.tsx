@@ -73,11 +73,16 @@ export function UpdateDialog() {
         ) : (
           <>
             {phase === 'error' && (
-              <div
-                className="rounded-lg border border-[var(--border)] p-3 text-xs"
-                style={{ color: 'var(--color-danger)' }}
-              >
-                更新失败：{error || '未知错误'}
+              <div className="space-y-1.5">
+                <div
+                  className="rounded-lg border border-[var(--border)] p-3 text-xs"
+                  style={{ color: 'var(--color-danger)' }}
+                >
+                  更新失败：{error || '未知错误'}
+                </div>
+                <p className="text-[11px] text-muted">
+                  可稍后重试；也可点「前往下载页」下载安装包手动覆盖安装（不影响本机账本数据），离线更新永远可用。
+                </p>
               </div>
             )}
 

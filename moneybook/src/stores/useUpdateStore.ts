@@ -11,6 +11,7 @@ import { create } from 'zustand';
 import { toast } from 'sonner';
 import {
   checkForUpdate,
+  friendlyUpdateError,
   installUpdate,
   markAutoChecked,
   shouldAutoCheck,
@@ -75,7 +76,8 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
         toast.info('暂未检测到正式发布版本，请稍后再试');
         break;
       case 'error':
-        toast.error(`检查更新失败：${r.message}（可稍后重试）`);
+        // message 已是友好文案（含重试/手动安装出路），直接展示，不再拼缀技术细节
+        toast.error(r.message);
         break;
     }
   },
@@ -114,7 +116,8 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
     } catch (e) {
       // eslint-disable-next-line no-console
       console.error('[update] 应用内更新失败：', e);
-      set({ phase: 'error', error: (e as Error).message });
+      // 错误归一化为友好文案（不暴露 undefined / 技术细节），供弹窗错误态展示
+      set({ phase: 'error', error: friendlyUpdateError(e) });
     }
   },
 

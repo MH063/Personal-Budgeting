@@ -7,7 +7,13 @@
 //      正式版」严格一致，确保任何用户都不会被引导安装半成品；
 //   3) 网络请求只访问 GitHub 公开 API，不携带任何本机数据，不涉及隐私；
 //   4) 检查入口有两处：关于页手动点击、启动时自动扫描（24h 节流）；发现新版本后
-//      由用户确认（立即更新 / 稍后提醒 / 跳过此版本），绝不静默安装。
+//      由用户确认（立即更新 / 稍后提醒 / 跳过此版本），绝不静默安装；
+//   5) GitHub 不可达时的兜底（国内网络常见）：
+//      - 检查带 15s 超时 + 错误归一化为友好文案（不暴露 undefined）；
+//      - 失败不写自动扫描节流时间戳 → 下次启动自动重试；手动按钮随时可重试；
+//      - 任何时候都可走「手动安装」路径：从下载页/他人转发/U盘等任意渠道获取
+//        新版本安装包双击覆盖安装，NSIS 覆盖安装保留本机账本数据——应用内
+//        一键更新需要网络，但手动更新永远可用。
 import { getKV, setKV } from '@/api/kv';
 import { httpFetch } from '@/lib/http';
 // 纯函数统一放在 lib/version.ts（正式版过滤 + 版本比较），便于单测直接引用、无需加载 kv 依赖链
@@ -27,6 +33,8 @@ const LAST_CHECK_KEY = 'kv.update.lastCheck';
 
 /** 启动自动检查节流间隔：24 小时（进入应用时最多每天扫描一次） */
 export const AUTO_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
+/** 更新检查超时（毫秒）：GitHub 不可达（国内网络常见）时 15s 内返回，避免界面长时间无反馈 */
+const FETCH_TIMEOUT_MS = 15 * 1000;
 
 /** 远端正式版信息 */
 export interface ReleaseInfo {
@@ -50,34 +58,62 @@ export type UpdateCheckResult =
 /**
  * 拉取最新正式版（GitHub 按创建时间倒序返回 Releases）：
  * 跳过 draft / prerelease / 非正式版 tag，返回第一个符合的发布；无正式发布返回 null。
+ * 带超时控制：GitHub 不可达时 15s 内返回，失败由上层（friendlyUpdateError）归一化为友好提示。
  */
 export async function fetchLatestStableRelease(): Promise<ReleaseInfo | null> {
-  const res = await httpFetch(`https://api.github.com/repos/${UPDATE_REPO_SLUG}/releases?per_page=20`, {
-    method: 'GET',
-    headers: { Accept: 'application/vnd.github+json' },
-  });
-  if (!res.ok) throw new Error(`GitHub 接口返回 HTTP ${res.status}`);
-  const list = (await res.json()) as Array<{
-    tag_name?: string;
-    html_url?: string;
-    body?: string;
-    published_at?: string;
-    draft?: boolean;
-    prerelease?: boolean;
-  }>;
-  if (!Array.isArray(list)) return null;
-  for (const r of list) {
-    if (r.draft || r.prerelease) continue;
-    const v = parseStableTag(r.tag_name ?? '');
-    if (!v) continue;
-    return {
-      version: v,
-      url: String(r.html_url ?? UPDATE_RELEASES_PAGE),
-      notes: String(r.body ?? '').slice(0, 800),
-      publishedAt: String(r.published_at ?? ''),
-    };
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    const res = await httpFetch(`https://api.github.com/repos/${UPDATE_REPO_SLUG}/releases?per_page=20`, {
+      method: 'GET',
+      headers: { Accept: 'application/vnd.github+json' },
+      signal: controller.signal,
+    });
+    if (!res.ok) throw new Error(`GitHub 接口返回 HTTP ${res.status}`);
+    const list = (await res.json()) as Array<{
+      tag_name?: string;
+      html_url?: string;
+      body?: string;
+      published_at?: string;
+      draft?: boolean;
+      prerelease?: boolean;
+    }>;
+    if (!Array.isArray(list)) return null;
+    for (const r of list) {
+      if (r.draft || r.prerelease) continue;
+      const v = parseStableTag(r.tag_name ?? '');
+      if (!v) continue;
+      return {
+        version: v,
+        url: String(r.html_url ?? UPDATE_RELEASES_PAGE),
+        notes: String(r.body ?? '').slice(0, 800),
+        publishedAt: String(r.published_at ?? ''),
+      };
+    }
+    return null;
+  } finally {
+    clearTimeout(timer);
   }
-  return null;
+}
+
+/**
+ * 把更新相关异常归一化为「用户友好文案」，绝不再把技术细节 / undefined 暴露给用户。
+ * 背景：检查与安装的请求都走 httpFetch（Tauri 下由 Rust 侧发出），失败原因五花八门
+ *（DNS / 断网 / 超时 / GitHub 不可达），部分异常 message 为 undefined，历史出现过
+ * 界面显示「检查更新失败：undefined」。这里统一分类：
+ *   - 超时 / 取消（AbortError）→ 网络提示；
+ *   - 网络类关键词 → 网络提示 + 手动安装出路；
+ *   - 其它 → 简短描述，空值兜底。
+ */
+export function friendlyUpdateError(e: unknown): string {
+  if (e instanceof DOMException && e.name === 'AbortError') {
+    return '连接更新服务器超时，请检查网络后重试';
+  }
+  const raw = e instanceof Error ? e.message : typeof e === 'string' ? e : '';
+  if (/fetch|network|dns|econn|timeout|timed ?out|temporarily|connect/i.test(raw)) {
+    return '无法连接更新服务器（GitHub 可能暂时不可达），请检查网络后重试；也可前往下载页手动安装新版本';
+  }
+  return raw || '更新服务暂时不可用，请稍后重试';
 }
 
 /**
@@ -93,7 +129,9 @@ export async function checkForUpdate(): Promise<UpdateCheckResult> {
     if (getSkippedVersion() === info.version) return { kind: 'latest' }; // 已跳过：视为已是最新，不再打扰
     return { kind: 'available', info };
   } catch (e) {
-    return { kind: 'error', message: (e as Error).message };
+    // 网络失败等异常统一归一化为友好文案（不暴露 undefined/技术细节），
+    // 由界面提示用户「重试 / 前往下载页手动安装」——GitHub 不可达不影响手动更新路径
+    return { kind: 'error', message: friendlyUpdateError(e) };
   }
 }
 

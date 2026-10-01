@@ -1,15 +1,15 @@
 import { Link } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
-import { Hint } from '@/components/ui/hint';
 import { formatAppVersion } from '@/lib/appVersion';
 import { useUpdateStore } from '@/stores/useUpdateStore';
-import { UPDATE_REPO_SLUG } from '@/lib/update';
+import { openExternal, UPDATE_RELEASES_PAGE } from '@/lib/update';
 
 /**
  * 关于系统：版本信息、更新检查（内置 GitHub Releases）、版权与技术架构说明。
  * 更新仓库内置为常量（见 lib/update.ts 的 UPDATE_REPO_SLUG），用户无需填写；
  * 版本号统一来自 src/lib/appVersion.ts（由 scripts/sync-version.mjs 从 package.json 同步）；
  * 检查结果由全局 UpdateDialog 弹窗统一呈现（与启动自动扫描共用同一逻辑）。
+ * 「前往下载页」为手动兜底入口：GitHub 不可达时仍可通过下载安装包覆盖安装（不影响数据）。
  */
 export default function AboutSystem() {
   const checking = useUpdateStore((s) => s.checking);
@@ -29,7 +29,9 @@ export default function AboutSystem() {
             <Button size="sm" onClick={() => void checkManually()} disabled={checking}>
               {checking ? '检查中…' : '检查更新'}
             </Button>
-            <Hint text={`新版本发布在 GitHub Releases（${UPDATE_REPO_SLUG}）；启动时会自动扫描一次（每天至多一次），发现新版本由你确认是否更新。`} />
+            <Button variant="outline" size="sm" onClick={() => void openExternal(UPDATE_RELEASES_PAGE)}>
+              前往下载页
+            </Button>
           </div>
         </div>
       </div>
