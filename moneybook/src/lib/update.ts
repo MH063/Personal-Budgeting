@@ -56,44 +56,99 @@ export type UpdateCheckResult =
   | { kind: 'error'; message: string };
 
 /**
- * 拉取最新正式版（GitHub 按创建时间倒序返回 Releases）：
- * 跳过 draft / prerelease / 非正式版 tag，返回第一个符合的发布；无正式发布返回 null。
- * 带超时控制：GitHub 不可达时 15s 内返回，失败由上层（friendlyUpdateError）归一化为友好提示。
+ * 拉取最新正式版。优先读 Release 资产的 latest.json 直链——与应用内一键更新共用
+ * 同一数据源（发布什么就能更新到什么），且走 GitHub 文件分发、不经 api.github.com，
+ * 天然规避两类 403：无 User-Agent 请求被 GitHub 直接拒绝、未认证 API 的 60 次/小时
+ * 限流（截图「GitHub 接口返回 HTTP 403」即源于此）。直链失败时降级到公开 API 兜底
+ * （同样显式携带 User-Agent 头）。两条路径都只认正式三段版本（四段/预发布一律跳过）。
+ * 带总超时控制：GitHub 不可达时 15s 内返回，失败由上层（friendlyUpdateError）归一化。
  */
 export async function fetchLatestStableRelease(): Promise<ReleaseInfo | null> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {
-    const res = await httpFetch(`https://api.github.com/repos/${UPDATE_REPO_SLUG}/releases?per_page=20`, {
-      method: 'GET',
-      headers: { Accept: 'application/vnd.github+json' },
-      signal: controller.signal,
-    });
-    if (!res.ok) throw new Error(`GitHub 接口返回 HTTP ${res.status}`);
-    const list = (await res.json()) as Array<{
-      tag_name?: string;
-      html_url?: string;
-      body?: string;
-      published_at?: string;
-      draft?: boolean;
-      prerelease?: boolean;
-    }>;
-    if (!Array.isArray(list)) return null;
-    for (const r of list) {
-      if (r.draft || r.prerelease) continue;
-      const v = parseStableTag(r.tag_name ?? '');
-      if (!v) continue;
-      return {
-        version: v,
-        url: String(r.html_url ?? UPDATE_RELEASES_PAGE),
-        notes: String(r.body ?? '').slice(0, 800),
-        publishedAt: String(r.published_at ?? ''),
-      };
+    let manifest: ReleaseInfo | null = null;
+    try {
+      manifest = await fetchLatestJson(controller.signal);
+    } catch (e) {
+      // 直链失败（网络/DNS/HTTP 拒绝等）不阻断，降级到 API 兜底
+      // 关键位置日志：便于排查「检查更新一直报网络失败」类问题
+      // eslint-disable-next-line no-console
+      console.warn('[update] latest.json 直链获取失败，降级 API：', e);
     }
-    return null;
+    if (manifest) return manifest;
+    return await fetchLatestFromApi(controller.signal);
   } finally {
     clearTimeout(timer);
   }
+}
+
+/** 主路径：读取 Release 资产的 latest.json（Tauri updater 清单，含版本/说明/发布时间） */
+async function fetchLatestJson(signal: AbortSignal): Promise<ReleaseInfo | null> {
+  const res = await httpFetch(
+    `https://github.com/${UPDATE_REPO_SLUG}/releases/latest/download/latest.json`,
+    {
+      method: 'GET',
+      headers: {
+        Accept: 'application/json',
+        // 显式携带 User-Agent：GitHub 对缺失 UA 的请求一律 403；Rust 侧 reqwest 默认不带，
+        // 历史曾因此直接撞上 403
+        'User-Agent': `moneybook-updater/${APP_VERSION}`,
+      },
+      signal,
+    },
+  );
+  if (!res.ok) throw new Error(`更新清单获取失败（HTTP ${res.status}）`);
+  const data = (await res.json().catch(() => null)) as {
+    version?: string;
+    notes?: string;
+    pub_date?: string;
+  } | null;
+  const version = parseStableTag(data?.version ?? '');
+  if (!version) return null;
+  return {
+    version,
+    url: UPDATE_RELEASES_PAGE,
+    notes: String(data?.notes ?? '').slice(0, 800),
+    publishedAt: String(data?.pub_date ?? ''),
+  };
+}
+
+/** 兜底路径：GitHub 公开 API（按创建时间倒序返回 Releases），过滤 draft/prerelease/非正式 tag */
+async function fetchLatestFromApi(signal: AbortSignal): Promise<ReleaseInfo | null> {
+  const res = await httpFetch(
+    `https://api.github.com/repos/${UPDATE_REPO_SLUG}/releases?per_page=20`,
+    {
+      method: 'GET',
+      headers: {
+        Accept: 'application/vnd.github+json',
+        'User-Agent': `moneybook-updater/${APP_VERSION}`,
+      },
+      signal,
+    },
+  );
+  if (!res.ok) throw new Error(`GitHub 接口返回 HTTP ${res.status}`);
+  const list = (await res.json().catch(() => null)) as Array<{
+    tag_name?: string;
+    html_url?: string;
+    body?: string;
+    published_at?: string;
+    draft?: boolean;
+    prerelease?: boolean;
+  }> | null;
+  if (!Array.isArray(list)) return null;
+  for (const r of list) {
+    if (r.draft || r.prerelease) continue;
+    const v = parseStableTag(r.tag_name ?? '');
+    if (!v) continue;
+    return {
+      version: v,
+      url: String(r.html_url ?? UPDATE_RELEASES_PAGE),
+      notes: String(r.body ?? '').slice(0, 800),
+      publishedAt: String(r.published_at ?? ''),
+    };
+  }
+  return null;
 }
 
 /**
@@ -110,6 +165,11 @@ export function friendlyUpdateError(e: unknown): string {
     return '连接更新服务器超时，请检查网络后重试';
   }
   const raw = e instanceof Error ? e.message : typeof e === 'string' ? e : '';
+  // GitHub 拒绝类（403/429/限流/封禁）：常见于无 User-Agent 请求或未认证 API 超限，
+  // 属网络侧问题而非应用缺陷，同样给出重试 + 手动安装出路
+  if (/403|429|forbidden|rate\s?limit|access\s?denied|blocked/i.test(raw)) {
+    return '更新请求被拒绝（GitHub 可能暂时不可达或请求过于频繁），请稍后重试；也可前往下载页手动安装新版本';
+  }
   if (/fetch|network|dns|econn|timeout|timed ?out|temporarily|connect/i.test(raw)) {
     return '无法连接更新服务器（GitHub 可能暂时不可达），请检查网络后重试；也可前往下载页手动安装新版本';
   }
