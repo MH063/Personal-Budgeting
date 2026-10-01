@@ -4,16 +4,21 @@ import dayjs from 'dayjs';
 import { getKV, setKV } from '@/api/kv';
 import { Button } from '@/components/ui/button';
 import { Hint } from '@/components/ui/hint';
+import { Input } from '@/components/ui/input';
 import { ConfirmDialog } from '@/components/common/ConfirmDialog';
 import { LAST_BACKUP_KEY, STORAGE_SAVE_DIR_KEY } from '@/lib/constants';
 import { exportAllData, maskExportBundle } from '@/api/dataExport';
 import { downloadJSON } from '@/lib/export';
 import { seedTestData } from '@/api/seed';
+import { resetAllData } from '@/api/factoryReset';
 
 export default function BackupRestore() {
   const [lastBackup, setLastBackup] = useState<string | null>(() => getKV(LAST_BACKUP_KEY) || null);
   const [pendingRestore, setPendingRestore] = useState<string | null>(null);
   const [pendingSensitiveExport, setPendingSensitiveExport] = useState(false);
+  // 恢复出厂设置：是否已展开确认区 + 确认输入框内容（必须输入「恢复出厂设置」才能执行）
+  const [resetArmed, setResetArmed] = useState(false);
+  const [resetConfirmText, setResetConfirmText] = useState('');
 
   useEffect(() => {
     setLastBackup(getKV(LAST_BACKUP_KEY) || null);
@@ -100,6 +105,25 @@ export default function BackupRestore() {
     }
   }
 
+  /** 恢复出厂设置：清空全部数据并回到首次引导（浏览器预览仅提示不可执行） */
+  async function handleFactoryReset() {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    if (typeof (window as any)?.__TAURI_INTERNALS__ === 'undefined') {
+      toast.warning('浏览器预览不可写库，请在 Tauri 桌面版执行恢复出厂设置。');
+      setResetArmed(false);
+      setResetConfirmText('');
+      return;
+    }
+    try {
+      const { clearedTables } = await resetAllData();
+      toast.success(`已恢复出厂设置：${clearedTables} 张数据表已清空，即将回到首次引导`);
+      // 刷新页面重置全部前端内存状态；seed_done 缺失会触发 OnboardingModal 自动弹出
+      setTimeout(() => window.location.reload(), 800);
+    } catch (e) {
+      toast.error(`恢复出厂设置失败：${(e as Error).message}`);
+    }
+  }
+
   return (
     <div className="space-y-3">
       {/* 一键填充测试数据仅开发期可见：正式打包（production build）后该模块整体不存在（用户要求） */}
@@ -139,6 +163,46 @@ export default function BackupRestore() {
         <h3 className="mb-1 font-semibold">恢复</h3>
         <p className="mb-3 text-sm text-muted">从先前导出的备份文件覆盖当前数据。</p>
         <Button variant="danger" onClick={handleRestore}>从备份恢复</Button>
+      </div>
+
+      <div className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-4">
+        <h3 className="mb-1 font-semibold">恢复出厂设置</h3>
+        <p className="mb-3 text-sm text-muted">
+          清空全部数据（交易、账户、分类、预算、借贷、AI 配置、知识库等），回到首次使用状态。
+          此操作不可恢复，建议先导出一份备份。
+        </p>
+        {!resetArmed ? (
+          <Button variant="danger" onClick={() => setResetArmed(true)}>恢复出厂设置</Button>
+        ) : (
+          <div className="space-y-2">
+            <p className="text-xs" style={{ color: 'var(--color-danger)' }}>
+              将清除本机全部账本数据与设置，不可撤销。请输入「恢复出厂设置」以确认。
+            </p>
+            <Input
+              value={resetConfirmText}
+              onChange={(e) => setResetConfirmText(e.target.value)}
+              placeholder="输入「恢复出厂设置」"
+            />
+            <div className="flex flex-wrap gap-2">
+              <Button
+                variant="danger"
+                disabled={resetConfirmText !== '恢复出厂设置'}
+                onClick={() => void handleFactoryReset()}
+              >
+                确认并清除全部数据
+              </Button>
+              <Button
+                variant="outline"
+                onClick={() => {
+                  setResetArmed(false);
+                  setResetConfirmText('');
+                }}
+              >
+                取消
+              </Button>
+            </div>
+          </div>
+        )}
       </div>
 
       <ConfirmDialog
