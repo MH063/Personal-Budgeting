@@ -1,0 +1,154 @@
+# 正式版自动发布：打正式 tag（如 v1.1.0）推送后，GitHub 云端自动完成
+# 「构建 → 私钥签名 → 生成 latest.json → 发布 Release」全流程。
+#
+# 为什么必须走 CI：应用内「一键更新」读取的正是 Release 资产中的 latest.json，
+# 该清单由 tauri-action 依据本次构建产物生成（含 .sig 签名），手动发布极易漏文件
+# 或写错地址；由 CI 统一出口可保证「发布什么，就能更新到什么」。
+#
+# 一次性配置（仓库 Settings → Secrets and variables → Actions → New repository secret）：
+#   1) TAURI_SIGNING_PRIVATE_KEY          = 本机 C:\Users\MH\.tauri\moneybook.key 的完整内容
+#   2) TAURI_SIGNING_PRIVATE_KEY_PASSWORD = 生成密钥时设置的口令
+# 注意：这两个值绝不能写进仓库或提交到 git；泄露私钥意味着他人可以伪造你的更新包。
+name: 发布正式版
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  # 第一关：只有严格三段正式 tag（v1.1.0）才放行；
+  # 四段测试 tag（v1.0.0.1）等一律跳过，绝不进入 stable 更新通道。
+  check-tag:
+    runs-on: ubuntu-latest
+    outputs:
+      is_stable: ${{ steps.verify.outputs.is_stable }}
+    steps:
+      - id: verify
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "is_stable=true" >> "$GITHUB_OUTPUT"
+            echo "检测到正式版 tag：${GITHUB_REF_NAME}"
+          else
+            echo "is_stable=false" >> "$GITHUB_OUTPUT"
+            echo "非正式版 tag（${GITHUB_REF_NAME}），跳过发布流程"
+          fi
+
+  release:
+    needs: check-tag
+    if: needs.check-tag.outputs.is_stable == 'true'
+    runs-on: windows-latest
+    permissions:
+      contents: write # 创建 Release 与上传资产需要写权限
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v5
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: moneybook/package-lock.json
+
+      - name: 安装前端依赖
+        working-directory: moneybook
+        run: npm ci
+
+      - name: 校验 tag 与 package.json 版本一致
+        working-directory: moneybook
+        shell: bash
+        run: |
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::tag（v$TAG_VERSION）与 package.json（$PKG_VERSION）版本不一致；请先在本地执行 npm run release:patch|minor|major 并提交后再打 tag"
+            exit 1
+          fi
+          echo "版本校验通过：$PKG_VERSION"
+
+      - name: 同步版本到 Cargo.toml / tauri.conf.json / appVersion.ts
+        working-directory: moneybook
+        run: npm run version:sync
+
+      - name: 提取更新说明（CHANGELOG 当前版本段落）
+        # 发布说明正文 = CHANGELOG.md 中「## v<版本号>」段落到下一个标题前的内容，
+        # 同时成为 GitHub Release 页面说明与应用内更新弹窗正文（latest.json 的 notes）。
+        # 这样用户看到的永远是「新增功能 / 修复问题 / 体验优化」，而非固定模板话术。
+        # 缺段落时直接报错终止发布（宁可失败也不发布无说明的版本）。
+        id: notes
+        shell: bash
+        run: |
+          cd moneybook
+          VERSION="${GITHUB_REF_NAME#v}"
+          NOTES=$(awk -v ver="v${VERSION}" 'BEGIN{f=0} index($0,"## " ver)==1{f=1; next} /^## /{if(f) exit} f{print}' CHANGELOG.md)
+          if [ -z "${NOTES//[[:space:]]/}" ]; then
+            echo "::error::CHANGELOG.md 缺少 ## v${VERSION} 段落，请先补充更新说明再打标签"
+            exit 1
+          fi
+          {
+            echo "notes<<EOF"
+            echo "$NOTES"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "已提取 v${VERSION} 更新说明（${#NOTES} 字符）"
+
+      - name: 清理已存在的同名 Release（幂等重发）
+        # 背景：GitHub 不允许向已发布的 Release 重复上传资产（immutable），首次构建
+        # 失败或手动重跑时会残留同名 Release，导致后续上传报
+        # "Cannot upload assets to an immutable release"。故每次发布前先删除同名
+        # Release（保留 git tag），再由 tauri-action 从干净状态重建；删除失败
+        # （release 不存在）视为正常，不阻断流程。
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete "${{ github.ref_name }}" --yes 2>/dev/null || echo "同名 Release 不存在，跳过清理"
+
+      - name: 构建 · 签名 · 上传（草稿态）
+        # 关键设计（Tauri 官方模板同款）：先以草稿（draft）创建 Release 再上传资产。
+        # 草稿态允许重复上传/修改资产，彻底规避 GitHub 对已发布 Release 的不可变
+        # 限制。上传完成后由下一步「正式发布」把草稿转公开，用户即可下载。
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 签名密钥由仓库 Secrets 提供；缺失时构建会在签名环节直接失败（宁可失败也不发布未签名的包）
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: moneybook
+          tagName: ${{ github.ref_name }}
+          releaseName: '个人记账 ${{ github.ref_name }}'
+          # 发布说明取自 CHANGELOG.md 当前版本段落（上方 notes step）：
+          # 展示新增功能 / 修复问题 / 体验优化，同时写入 latest.json 的 notes，
+          # 应用内「检查更新」弹窗即显示这些内容。
+          releaseBody: ${{ steps.notes.outputs.notes }}
+          releaseDraft: true
+          prerelease: false
+          # 上传偶发失败时自动重试（应对 GitHub 侧瞬时异常）
+          retryAttempts: 3
+          # 更新清单 latest.json（应用内更新的数据源）由 tauri-action 默认生成并上传
+          # （对应输入 includeUpdaterJson，@v0 默认 true）；不显式声明该输入，
+          # 避免 dev 分支新输入名 uploadUpdaterJson 在 @v0 上触发 "Unexpected input" 告警。
+          # 资产命名必须为纯 ASCII 英文：tauri-action@v0 生成 latest.json 时按
+          # 「GitHub 上已上传资产名」与「本地计算的资产名」精确匹配来收集签名文件，
+          # 中文资产名在 GitHub 侧存储后匹配不上，会打印
+          # "Signature not found for the updater JSON" 并跳过 latest.json 上传。
+          # 强制英文名后上传名与匹配名一致，latest.json 正常生成；应用内更新的
+          # 下载 URL 也指向该英文资产名。
+          # 仅构建 Windows NSIS 安装包（本应用的一键更新主平台）；
+          # 将来要发布 macOS/Linux 时，在此处改为构建矩阵并补充对应 runners 即可
+          args: --bundles nsis
+          assetNamePattern: 'moneybook_[version]_[arch]-setup[ext]'
+
+      - name: 正式发布（草稿 → 公开）
+        # 草稿态 Release 用户不可见、也不会成为「最新版」，应用内更新读的
+        # releases/latest 拿不到它；上传全部资产（含 latest.json 与签名）后在此
+        # 转为公开，让用户可以下载、应用内更新可发现新版本。
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release edit "${{ github.ref_name }}" --draft=false
+          echo "已发布：个人记账 ${{ github.ref_name }}"
