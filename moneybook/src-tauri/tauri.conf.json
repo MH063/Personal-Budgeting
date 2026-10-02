@@ -45,7 +45,8 @@
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEE4MjhDREVFMTRCMzY0MEMKUldRTVpMTVU3czBvcUNrYkJld3V5UVJWNjZCSnVwSVJtWjdpbjEySXZXeGlkMDc2NllZWGc3WWUK",
       "endpoints": [
         "https://github.com/MH063/Personal-Budgeting/releases/latest/download/latest.json"
-      ]
+      ],
+      "installMode": "quiet"
     }
   }
 }

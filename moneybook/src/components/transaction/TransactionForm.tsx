@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { useForm, Controller } from 'react-hook-form';
+import { useForm, Controller, type FieldErrors } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { useQuery } from '@tanstack/react-query';
 import { z } from 'zod';
@@ -31,9 +31,9 @@ const schema = z.object({
   type: z.enum(['income', 'expense', 'transfer', 'lend', 'borrow']),
   amount: z.coerce.number().positive('金额必须大于 0'),
   categoryId: z.coerce.number().optional(),
-  accountId: z.coerce.number(),
+  accountId: z.coerce.number().optional(),
   toAccountId: z.coerce.number().optional(),
-  date: z.string(),
+  date: z.string().min(1, '请选择日期'),
   note: z.string().optional(),
   payTime: z.string().optional(),
   payMethod: z.string().optional(),
@@ -41,6 +41,21 @@ const schema = z.object({
   orderNo: z.string().optional(),
   merchantOrderNo: z.string().optional(),
   tagIds: z.array(z.number()).optional(),
+})
+// 必填校验（需求：金额/分类/账户/日期/订单号以红色 * 标识并按类型动态生效）：
+//  - 金额、账户、日期：全部类型必填（编辑时已预填，正常不会缺）；
+//  - 分类：仅收入/支出必填（转账/借出/借入无分类概念）；
+//  - 转入账户：仅转账必填；
+//  - 订单号：新增记账必填（红色 * 标识 + onSubmit 内校验），编辑旧交易不强制，
+//    避免历史无订单号的数据无法修改保存。
+.superRefine((d, ctx) => {
+  if (d.type === 'income' || d.type === 'expense') {
+    if (d.categoryId == null) ctx.addIssue({ code: 'custom', path: ['categoryId'], message: '请选择分类' });
+  }
+  if (d.accountId == null) ctx.addIssue({ code: 'custom', path: ['accountId'], message: '请选择账户' });
+  if (d.type === 'transfer' && d.toAccountId == null) {
+    ctx.addIssue({ code: 'custom', path: ['toAccountId'], message: '请选择转入账户' });
+  }
 });
 
 type FormData = z.infer<typeof schema>;
@@ -230,6 +245,8 @@ export default function TransactionForm({ open, onOpenChange, defaultType = 'exp
 
   async function onSubmit(d: FormData) {
     try {
+      // 订单号：仅新增记账必填（红色 * 标识），编辑旧交易不强制——历史数据可能没有订单号
+      if (!isEditing && !String(d.orderNo ?? '').trim()) { toast.error('请填写订单号'); return; }
       if (d.type === 'transfer' && !d.toAccountId) { toast.error('请选择转入账户'); return; }
       // 支出方向：该分类预算已超支/接近上限时强提醒（只提醒，不阻断记账）
       if (d.type === 'expense' && d.categoryId != null) {
@@ -248,7 +265,7 @@ export default function TransactionForm({ open, onOpenChange, defaultType = 'exp
       const date = resolveBookDate(d.date, d.payTime);
       const payload = {
         type: d.type, amount: d.amount,
-        categoryId: d.categoryId, accountId: d.accountId,
+        categoryId: d.categoryId, accountId: d.accountId as number, // superRefine 已保证账户必填
         toAccountId: d.toAccountId, date, note: d.note,
         // 付款方式(payMethod) 与账户(accountId) 关系：
         // accountId = 我方的资金账户实体（决定余额增减，必填）；
@@ -393,6 +410,12 @@ export default function TransactionForm({ open, onOpenChange, defaultType = 'exp
     });
   }
 
+  /** 提交前校验失败回调：把第一个必填错误以 toast 提示（字段旁已有红色 * 标识，用户一目了然） */
+  const onInvalid = (errs: FieldErrors<FormData>) => {
+    const first = Object.values(errs)[0];
+    toast.error(String((first as { message?: string })?.message ?? '请检查必填项'));
+  };
+
   return (
     <Sheet open={open} onClose={() => onOpenChange(false)} title={isEditing ? '编辑交易' : '记一笔'}>
       {/* 拍照/票据录入入口：本地 OCR，图片不出本机 */}
@@ -438,18 +461,21 @@ export default function TransactionForm({ open, onOpenChange, defaultType = 'exp
         </TabsList>
       </Tabs>
 
-      <form onSubmit={form.handleSubmit(onSubmit)} className="mt-5 space-y-4">
+      <form onSubmit={form.handleSubmit(onSubmit, onInvalid)} className="mt-5 space-y-4">
         <Controller
           control={form.control}
           name="amount"
           render={({ field, fieldState }) => (
-            <AmountInput {...field} error={fieldState.error?.message} />
+            <div>
+              <label className="mb-1 flex items-center gap-1 text-sm text-muted">金额 <RequiredStar /></label>
+              <AmountInput {...field} error={fieldState.error?.message} />
+            </div>
           )}
         />
 
         {(type === 'income' || type === 'expense') && (
           <div>
-            <label className="mb-1 block text-sm text-muted">分类</label>
+            <label className="mb-1 flex items-center gap-1 text-sm text-muted">分类 <RequiredStar /></label>
             <CategoryPicker type={type as 'income' | 'expense'} value={form.watch('categoryId')}
               onChange={(id) => form.setValue('categoryId', id)} />
             {catBudget && catBudget.status !== 'ok' && (
@@ -459,20 +485,20 @@ export default function TransactionForm({ open, onOpenChange, defaultType = 'exp
         )}
 
         <div>
-          <label className="mb-1 block text-sm text-muted">账户</label>
+          <label className="mb-1 flex items-center gap-1 text-sm text-muted">账户 <RequiredStar /></label>
           <AccountPicker value={form.watch('accountId')} onChange={(id) => form.setValue('accountId', id)} />
         </div>
 
         {type === 'transfer' && (
           <div>
-            <label className="mb-1 block text-sm text-muted">转入账户</label>
+            <label className="mb-1 flex items-center gap-1 text-sm text-muted">转入账户 <RequiredStar /></label>
             <AccountPicker value={form.watch('toAccountId')} onChange={(id) => form.setValue('toAccountId', id)}
               exclude={form.watch('accountId') ? [form.watch('accountId')!] : []} />
           </div>
         )}
 
         <div>
-          <label className="mb-1 block text-sm text-muted">日期</label>
+          <label className="mb-1 flex items-center gap-1 text-sm text-muted">日期 <RequiredStar /></label>
           <Input type="date" value={form.watch('date')} onChange={(e) => form.setValue('date', e.target.value)} />
         </div>
 
@@ -561,7 +587,7 @@ export default function TransactionForm({ open, onOpenChange, defaultType = 'exp
               />
             </div>
             <div>
-              <label className="mb-1 block text-sm text-muted">订单号</label>
+              <label className="mb-1 flex items-center gap-1 text-sm text-muted">订单号 <RequiredStar /></label>
               <Input
                 placeholder="订单号 / 交易单号"
                 value={form.watch('orderNo')}
@@ -601,4 +627,9 @@ function BudgetHint({ usage }: { usage: BudgetUsage }) {
       <span>{budgetWarnMessage(usage)}</span>
     </div>
   );
+}
+
+/** 必填项红色星号（用户需求：记一笔必填项以红色 * 标识） */
+function RequiredStar() {
+  return <span className="text-[var(--color-danger)]" title="必填">*</span>;
 }

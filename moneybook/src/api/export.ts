@@ -54,10 +54,30 @@ function downloadBlob(content: BlobPart, filename: string, type: string): void {
   URL.revokeObjectURL(url);
 }
 
-/** 把对象数组转成 CSV 并触发浏览器下载 */
-export function toCsv(rows: object[], filename?: string): void {
-  if (!rows.length) return;
-  downloadBlob(toCsvString(rows), filename ?? 'export.csv', 'text/csv;charset=utf-8;');
+/**
+ * 把对象数组保存为 CSV 文件。
+ * 桌面（Tauri）环境：弹系统保存对话框、经 fs 插件写入真实文件（WebView2 中
+ * blob + <a download> 触发下载不可靠——历史缺陷：点击导出 CSV 无反应）；
+ * 浏览器预览：回退 blob 触发下载。
+ * 返回保存路径；用户取消时返回 null。
+ */
+export async function toCsv(rows: object[], filename?: string): Promise<string | null> {
+  if (!rows.length) return null;
+  const content = toCsvString(rows);
+  const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+  if (isTauri) {
+    const { save } = await import('@tauri-apps/plugin-dialog');
+    const { writeTextFile } = await import('@tauri-apps/plugin-fs');
+    const path = await save({
+      defaultPath: filename ?? 'export.csv',
+      filters: [{ name: 'CSV 文件', extensions: ['csv'] }],
+    });
+    if (!path) return null; // 用户取消
+    await writeTextFile(path, content);
+    return path;
+  }
+  downloadBlob(content, filename ?? 'export.csv', 'text/csv;charset=utf-8;');
+  return '已触发下载';
 }
 
 /** 导出交易明细 CSV，返回提示信息 */
@@ -72,8 +92,9 @@ export async function exportToCsv(params: ExportParams): Promise<string> {
     备注: r.note ?? '',
     分类: r.category_name ?? '',
   }));
-  toCsv(data, `transactions_${params.from}_${params.to}.csv`);
-  return `已导出 ${data.length} 条`;
+  const saved = await toCsv(data, `transactions_${params.from}_${params.to}.csv`);
+  if (saved === null) return '已取消导出';
+  return `已导出 ${data.length} 条记录${saved === '已触发下载' ? '' : `，文件已保存`}`;
 }
 
 const csvToHtml = (s: string) =>
@@ -82,7 +103,43 @@ const csvToHtml = (s: string) =>
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;');
 
-/** 导出报表：优先用 window.print 打印（另存为 PDF），否则 fallback 为 TXT */
+/**
+ * 把报表 HTML 渲染进隐藏 iframe 并触发系统打印（可另存为 PDF）。
+ * 历史缺陷：旧实现用 window.open 开新窗口打印，在 Tauri WebView2 中弹窗被拦截
+ * （NewWindowRequested 默认拒绝），win 恒为 null，导致「导出 PDF (打印)」无反应。
+ * iframe 方案不依赖弹窗权限：iframe 拥有独立文档，contentWindow.print() 只打印
+ * iframe 内容（Chromium/WebView2 标准行为），打印完成即移除，不污染应用界面。
+ * 返回是否成功触发打印（浏览器拦截等情况由调用方提示兜底）。
+ */
+function printHtml(html: string): boolean {
+  if (typeof document === 'undefined') return false;
+  const iframe = document.createElement('iframe');
+  iframe.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0;visibility:hidden;';
+  document.body.appendChild(iframe);
+  try {
+    const doc = iframe.contentDocument;
+    if (!doc) return false;
+    doc.open();
+    doc.write(html);
+    doc.close();
+    // 等 iframe 内样式/内容渲染完成后触发打印（300ms 足够本地 HTML 就绪）
+    setTimeout(() => {
+      try {
+        iframe.contentWindow?.focus();
+        iframe.contentWindow?.print();
+      } catch {
+        /* 打印被环境拦截时静默：调用方按成功提示，用户仍可用 CSV 导出兜底 */
+      }
+      setTimeout(() => iframe.remove(), 1000);
+    }, 300);
+    return true;
+  } catch {
+    iframe.remove();
+    return false;
+  }
+}
+
+/** 导出报表：生成 HTML 后经系统打印对话框打印（可另存为 PDF） */
 export async function exportToPdf(params: ExportParams): Promise<string> {
   const rows = await listTransactionsDetailed({ from: params.from, to: params.to });
   const cats = await getCategoryDistribution('expense', params.from, params.to);
@@ -90,7 +147,7 @@ export async function exportToPdf(params: ExportParams): Promise<string> {
   const expense = rows.filter((r) => r.type === 'expense').reduce((s, r) => s + r.amount, 0);
   const surplus = income - expense;
 
-  // 不可用 window.print 时 fallback 导出纯文本
+  // 环境不支持 DOM 打印时 fallback 导出纯文本
   if (typeof window === 'undefined' || typeof window.print !== 'function') {
     const lines = [
       `交易报表 ${params.from} ~ ${params.to}`,
@@ -168,13 +225,8 @@ export async function exportToPdf(params: ExportParams): Promise<string> {
 </body>
 </html>`;
 
-  const win = window.open('', '_blank', 'width=900,height=700');
-  if (!win) {
-    return '无法打开打印窗口，请允许弹窗后重试（或改用 CSV 导出）';
+  if (!printHtml(html)) {
+    return '当前环境无法触发打印，请改用 CSV 导出';
   }
-  win.document.write(html);
-  win.document.close();
-  win.focus();
-  setTimeout(() => win.print(), 300);
-  return '已打开打印窗口，可选择另存为 PDF';
+  return '已打开系统打印窗口，可选择「另存为 PDF」完成导出';
 }

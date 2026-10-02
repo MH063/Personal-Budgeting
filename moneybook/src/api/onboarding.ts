@@ -15,9 +15,56 @@ export async function isSeeded(): Promise<boolean> {
   return rows.length > 0 && rows[0].value === '1';
 }
 
-/** 载入样本数据（幂等）。返回本次插入的流水条数；已 seed 则返回 0。 */
+/** 固化 seed_done 标记（幂等；防「标记丢失后样本重跑」） */
+async function markSeeded(): Promise<void> {
+  await execute(
+    `INSERT INTO settings (key, value) VALUES ($1, '1')
+     ON CONFLICT(key) DO UPDATE SET value = '1'`,
+    [SEED_KEY]
+  );
+}
+
+/** 001 迁移内置的默认分类名单（判断「分类是否用户自定义」的排除基准） */
+const DEFAULT_CATEGORIES = [
+  '餐饮', '交通', '购物', '居住', '娱乐', '医疗', '教育', '其他支出',
+  '工资', '奖金', '兼职', '投资收益', '红包', '其他收入',
+];
+
+/**
+ * 数据库里是否已存在「用户真实数据」（非内置默认/非样本）。
+ * 用于防止样本数据在已有数据的库上重跑。历史缺陷：seed_done 标记一旦丢失
+ * （数据库重建 / 损坏恢复 / 旧版本升级等），seedSampleData 会按需自动创建账户、
+ * 补插分类、插入样本流水，造成用户反馈的「更新后账户被自动创建、分类/标签重复」。
+ * 判定口径（全表维度，避免账本切换造成漏判）：
+ *   - 已有任何流水（账户/标签同理：全新库经 008 迁移清理后账户为空、标签恒为空）；
+ *   - 存在默认名单之外的分类（001 内置的默认分类不算用户数据）。
+ */
+async function hasRealUserData(): Promise<boolean> {
+  const tx = await select<{ c: number }>(`SELECT COUNT(*) AS c FROM transactions`);
+  if ((tx[0]?.c ?? 0) > 0) return true;
+  const ac = await select<{ c: number }>(`SELECT COUNT(*) AS c FROM accounts`);
+  if ((ac[0]?.c ?? 0) > 0) return true;
+  const tg = await select<{ c: number }>(`SELECT COUNT(*) AS c FROM tags`);
+  if ((tg[0]?.c ?? 0) > 0) return true;
+  const cats = await select<{ name: string }>(`SELECT name FROM categories`);
+  if (cats.some((c) => !DEFAULT_CATEGORIES.includes(c.name))) return true;
+  return false;
+}
+
+/**
+ * 载入样本数据（幂等 + 数据保护）。
+ * 返回本次插入的流水条数；已 seed 或「库中已有用户真实数据」时返回 0。
+ * 保护说明：只有确认「全新空库」才允许创建演示账户与样本流水——这是首次引导下
+ * 用户主动点「载入示例数据」的有意行为；一旦发现任何用户真实使用痕迹，
+ * 立即跳过并固化 seed_done，绝不重复创建账户/分类/流水（用户反馈的更新后异常即源于此）。
+ */
 export async function seedSampleData(): Promise<number> {
   if (await isSeeded()) return 0;
+  // 已有用户真实数据：跳过样本并固化标记，杜绝「更新后账户自动创建、分类/标签重复」
+  if (await hasRealUserData()) {
+    await markSeeded();
+    return 0;
+  }
 
   return runInTransaction(async () => {
     // 账户：已不再内置默认账户（用户自行创建）；示例数据所需的 4 个账户缺失时按需创建，

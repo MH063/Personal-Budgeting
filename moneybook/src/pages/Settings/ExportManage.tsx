@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { toast } from 'sonner';
 import dayjs from 'dayjs';
-import { getMonthlySurplus, getCategoryDistribution } from '@/api/stats';
+import { getCategoryDistribution } from '@/api/stats';
 import { exportToCsv, exportToPdf } from '@/api/export';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -12,18 +12,9 @@ export default function ExportManage() {
   const [from, setFrom] = useState(dayjs().startOf('month').format('YYYY-MM-DD'));
   const [to, setTo] = useState(dayjs().format('YYYY-MM-DD'));
   const [loading, setLoading] = useState(false);
-  const [monthStat, setMonthStat] = useState<{ income: number; expense: number; surplus: number }>({ income: 0, expense: 0, surplus: 0 });
   const [cats, setCats] = useState<{ name: string; icon: string; total: number }[]>([]);
 
   const loadPreview = async () => {
-    // 本月预览
-    const mStart = dayjs().startOf('month').format('YYYY-MM-DD');
-    const mEnd = dayjs().format('YYYY-MM-DD');
-    const rows = await getMonthlySurplus(mStart, mEnd);
-    if (rows.length) {
-      const { income, expense, surplus } = rows[0];
-      setMonthStat({ income, expense, surplus });
-    }
     // 选定区间分类汇总（PDF 打印表的源数据）
     setCats(await getCategoryDistribution('expense', from, to));
   };
@@ -76,28 +67,6 @@ export default function ExportManage() {
             <Button variant="outline" onClick={onExportPdf} disabled={loading}>导出 PDF (打印)</Button>
           </div>
           <p className="text-xs text-muted">PDF 通过浏览器打印功能实现，在弹出的打印窗口中选择「另存为 PDF」即可导出。</p>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>本月概览</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="grid grid-cols-3 gap-3">
-            <div>
-              <div className="text-xs text-muted">收入</div>
-              <div className="text-lg font-semibold" style={{ color: 'var(--color-success)' }}>{formatMoney(monthStat.income)}</div>
-            </div>
-            <div>
-              <div className="text-xs text-muted">支出</div>
-              <div className="text-lg font-semibold" style={{ color: 'var(--color-danger)' }}>{formatMoney(monthStat.expense)}</div>
-            </div>
-            <div>
-              <div className="text-xs text-muted">结余</div>
-              <div className="text-lg font-semibold">{formatMoney(monthStat.surplus)}</div>
-            </div>
-          </div>
         </CardContent>
       </Card>
 

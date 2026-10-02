@@ -1,5 +1,6 @@
 import dayjs from 'dayjs';
-import { readAIConfig } from '@/stores/useAIStore';
+import { readAIConfig, useAIStore } from '@/stores/useAIStore';
+import { getKV, setKV } from './kv';
 import { httpFetch, isAbortError, isTauriRuntime } from '@/lib/http';
 import { getInsights, getCategoryDistribution, getNetWorth } from './stats';
 import { select } from './db';
@@ -82,7 +83,7 @@ export async function validateConfigWith(cfg: { baseURL: string; apiKey: string;
     if (!ok) {
       const t = await res.text().catch(() => '');
       // 不输出响应体中的敏感信息，仅提示状态码
-      throw new Error(`连接失败：HTTP ${res.status}`);
+      throw new Error(`连接失败：${describeAiHttpError(res.status, baseURL)}（HTTP ${res.status}）`);
     }
   } catch (e) {
     if (e instanceof Error && e.message.startsWith('连接失败')) throw e;
@@ -103,6 +104,113 @@ function normalizeBaseURL(raw: string, fallbackModel?: string): { baseURL: strin
   const base = raw.trim().replace(/\/+$/, '').replace(/\/chat\/completions$/, '');
   const model = (fallbackModel ?? readAIConfig().model).trim();
   return { baseURL: base, model };
+}
+
+/**
+ * 本地 AI 用量统计（零成本方案）：
+ * 各厂商的「已使用金额/请求次数」没有统一的公开查询接口，且查询余额本身免费，
+ * 因此请求次数与 Tokens 改为在每次 chat/chatStream 成功后本地累计（kv.aiUsage），
+ * 凭证目录据此展示「调用次数 / 累计 Tokens / 本月 Tokens」，无需联网查询、不产生费用。
+ * 按生效凭证 id 聚合，切换凭证即分开统计。
+ */
+export interface AiUsageStat {
+  requests: number;
+  tokens: number;
+  /** 当前统计月（YYYY-MM）：跨月时本月 Tokens 归零重计 */
+  month: string;
+  monthTokens: number;
+}
+
+const AI_USAGE_KV_KEY = 'kv.aiUsage';
+
+/** 读取某凭证的本地用量统计；无记录时返回全 0 基线（不抛错）。 */
+export function loadAiUsage(providerId: string): AiUsageStat {
+  const zero: AiUsageStat = { requests: 0, tokens: 0, month: dayjs().format('YYYY-MM'), monthTokens: 0 };
+  try {
+    const all = JSON.parse(String(getKV(AI_USAGE_KV_KEY) ?? 'null')) as Record<string, AiUsageStat> | null;
+    return all?.[providerId] ?? zero;
+  } catch {
+    return zero;
+  }
+}
+
+/** 成功响应后累计一次请求与 Tokens；usage 缺失时仅记请求次数（统计失败不影响主流程）。 */
+export function recordAiUsage(usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number }): void {
+  try {
+    const s = useAIStore.getState();
+    const pid = s.activeProviderId || s.providers[0]?.id;
+    if (!pid) return;
+    const now = dayjs().format('YYYY-MM');
+    const cur = loadAiUsage(pid);
+    const tokens = usage?.total_tokens ?? ((usage?.prompt_tokens ?? 0) + (usage?.completion_tokens ?? 0));
+    const next: AiUsageStat = {
+      requests: cur.requests + 1,
+      tokens: cur.tokens + tokens,
+      month: now,
+      monthTokens: cur.month === now ? cur.monthTokens + tokens : tokens,
+    };
+    const all = JSON.parse(String(getKV(AI_USAGE_KV_KEY) ?? 'null')) as Record<string, AiUsageStat> | null ?? {};
+    setKV(AI_USAGE_KV_KEY, JSON.stringify({ ...all, [pid]: next }));
+  } catch { /* 用量统计失败不阻塞调用主流程 */ }
+}
+
+/**
+ * 错误码 → 中文原因映射（按服务商特化）。
+ * 依据各厂商官方错误码文档：
+ * - DeepSeek：400 格式错误 / 401 认证失败 / 402 余额不足 / 422 参数错误 / 429 请求速率达到上限 / 500 服务器故障 / 503 服务器繁忙
+ * - Anthropic Claude：400 请求格式 / 401 认证失败 / 402 计费异常 / 403 权限不足 / 404 资源不存在 / 409 冲突 / 413 请求过大 / 429 限流或额度上限 / 500 内部错误 / 504 超时 / 529 过载
+ * - OpenAI 及 OpenAI 兼容服务：400 参数错误 / 401 认证失败 / 402 余额不足 / 403 权限不足 / 404 接口或模型不存在 / 409 冲突 / 413 请求过大 / 422 参数语义错误 / 429 限流或额度用尽 / 500 内部错误 / 502 网关 / 503 不可用 / 504 超时
+ * 未列出的状态码回退为「HTTP xxx」原文，不编造原因。
+ */
+export function describeAiHttpError(status: number, baseURL: string): string {
+  const host = String(baseURL ?? '').toLowerCase();
+  // Anthropic /messages 端点（含 Claude）
+  if (host.includes('anthropic') || host.includes('claude')) {
+    const map: Record<number, string> = {
+      400: '请求格式错误',
+      401: '认证失败：API Key 无效、已吊销或已过期',
+      402: '计费信息异常：请检查付款方式',
+      403: '权限不足：Key 无权限访问该资源',
+      404: '资源不存在：请检查接口地址与模型名',
+      409: '请求冲突：资源被并发修改或已存在',
+      413: '请求体过大：超出 32MB 上限',
+      429: '请求速率或额度上限：已命中限流或月度额度',
+      500: '服务器内部错误：请稍后重试',
+      504: '处理超时：请改用流式或缩短请求',
+      529: '服务过载：服务器繁忙，请稍后重试',
+    };
+    return map[status] ?? `HTTP ${status}`;
+  }
+  // DeepSeek（官方错误码表）
+  if (host.includes('deepseek')) {
+    const map: Record<number, string> = {
+      400: '格式错误：请求体格式不符合要求',
+      401: '认证失败：API Key 错误，请检查后重试',
+      402: '账号余额不足：请确认余额并前往充值',
+      422: '参数错误：请求体参数有误',
+      429: '请求速率达到上限：TPM 或 RPM 超限，请合理规划请求速率',
+      500: '服务器故障：请等待后重试',
+      503: '服务器繁忙：服务器负载过高，请稍后重试',
+    };
+    return map[status] ?? `HTTP ${status}`;
+  }
+  // OpenAI 及 OpenAI 兼容服务
+  const map: Record<number, string> = {
+    400: '参数错误：请求体格式或字段不符合要求',
+    401: '认证失败：API Key 无效，请检查后重试',
+    402: '余额不足：账号额度已用尽，请充值',
+    403: '权限不足：Key 无权限访问该资源',
+    404: '接口或模型不存在：请检查接口地址与模型名',
+    409: '请求冲突：请检查请求状态',
+    413: '请求体过大：超出接口大小上限',
+    422: '参数错误：请求体参数语义不符合要求',
+    429: '请求速率或额度上限：已限流或余额/用量用尽',
+    500: '服务器内部错误：请稍后重试',
+    502: '网关错误：请稍后重试',
+    503: '服务不可用：请稍后重试',
+    504: '处理超时：请稍后重试',
+  };
+  return map[status] ?? `HTTP ${status}`;
 }
 
 export interface ChatMessageInput {
@@ -139,12 +247,14 @@ export async function chat(messages: ChatMessageInput[], opts: { signal?: AbortS
     throw new Error(`网络错误：无法连接到 ${baseURL}（${(e as Error).message}）`);
   }
   if (!res.ok) {
-    // 不把响应正文里的敏感信息回传到界面
-    throw new Error(`AI 服务返回错误：HTTP ${res.status}`);
+    // 不把响应正文里的敏感信息回传到界面；状态码映射为中文原因（见 describeAiHttpError）
+    throw new Error(`AI 服务返回错误：${describeAiHttpError(res.status, baseURL)}（HTTP ${res.status}）`);
   }
   const data = await res.json();
   const text = data?.choices?.[0]?.message?.content;
   if (typeof text !== 'string') throw new Error('AI 服务返回格式异常');
+  // 本地用量统计：成功响应后累计请求次数与 Tokens（见 recordAiUsage 注释，零成本）
+  recordAiUsage(data?.usage);
   return text.trim();
 }
 
@@ -168,6 +278,8 @@ export async function chatStream(
   if (c.topP != null) body.top_p = c.topP;
   const capped = capMaxTokens(c.maxTokens);
   if (capped != null) body.max_tokens = capped;
+  // 请求流式响应中附带 usage（OpenAI 系标准扩展，用于本地用量统计；不支持的厂商会忽略该字段）
+  body.stream_options = { include_usage: true };
 
   let res: Response;
   try {
@@ -182,13 +294,15 @@ export async function chatStream(
     throw new Error(`网络错误：无法连接到 ${baseURL}（${(e as Error).message}）`);
   }
   if (!res.ok || !res.body) {
-    throw new Error(`AI 服务返回错误：HTTP ${res.status}`);
+    throw new Error(`AI 服务返回错误：${describeAiHttpError(res.status, baseURL)}（HTTP ${res.status}）`);
   }
 
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
   let full = '';
+  // 流式响应末尾（stream_options.include_usage）附带的用量信息，供本地统计
+  let streamUsage: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } | undefined;
   try {
     for (;;) {
       const { done, value } = await reader.read();
@@ -208,6 +322,7 @@ export async function chatStream(
             full += delta;
             opts.onDelta(delta);
           }
+          if (j?.usage) streamUsage = j.usage;
         } catch {
           /* 忽略无法解析的碎片 */
         }
@@ -223,6 +338,8 @@ export async function chatStream(
   } finally {
     reader.releaseLock();
   }
+  // 本地用量统计：流式完成后累计请求次数与 Tokens（见 recordAiUsage 注释，零成本）
+  recordAiUsage(streamUsage);
   return full.trim();
 }
 

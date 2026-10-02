@@ -7,13 +7,17 @@ import { Select } from '@/components/ui/select';
 import { loadUserRules, saveUserRules, learnCorrection, type UserRule } from '@/api/merchantNorm';
 import { queryAuditLogs, countAuditByKind, type AuditEntry } from '@/api/audit';
 import AuditHistoryDialog from '@/components/ai/AuditHistoryDialog';
+import KnowledgePanel from '@/components/ai/KnowledgePanel';
 
 /**
- * 智能规则管理（AI + 规则混合的可解释第一层）
- *  - 规则优先级：用户规则 > 内置同义 > 学习模型/AI 默认。
- *  - merchant_renamed：把命中商户归并到规范名（麦当劳/金拱门/McDonald's 归一共）。
- *  - categorize：命中文本强制归到某分类（星巴克 → 咖啡），命中即显示"依据"。
- *  规则仅存本机（settings 表），无网络；改后即时生效于分类推荐与商户画像。
+ * 智能规则管理（AI + 规则混合的可解释第一层，与「知识库·参考知识与规则」合并统一管理）
+ *  两类规则并存（用户要求合并入口，逻辑上明确区分）：
+ *   1) 执行规则：本地即时生效、不消耗 AI —— 用户规则 > 内置同义 > 学习模型/AI 默认。
+ *      - merchant_renamed：把命中商户归并到规范名（麦当劳/金拱门/McDonald's 归一共）。
+ *      - categorize：命中文本强制归到某分类（星巴克 → 咖啡），命中即显示"依据"。
+ *      规则仅存本机（settings 表），无网络；改后即时生效于分类推荐与商户画像。
+ *   2) 参考知识与规则：随 AI 请求发送给当前服务商作为参考资料（见 KnowledgePanel），
+ *      对全部服务商一致生效，与凭证无关。两者分开管理、互不影响。
  *  - 审计历史：页面只显示最近数条摘要，完整记录（筛选/搜索/分页/清理）在弹窗中查看，
  *    避免记录随使用增长后把设置页撑得又长又难查。
  */
@@ -81,7 +85,7 @@ export default function RuleManage() {
       <div>
         <h2 className="mb-1 flex items-center gap-1.5 text-lg font-semibold">
           智能规则
-          <Hint text="用户规则 > 内置同义 > AI/默认的优先级执行。命中即生效并显示「依据」，可在记账/导入时一键采用；全部本地存储。" />
+          <Hint text="两类规则统一管理：① 执行规则——用户规则 > 内置同义 > AI/默认的优先级执行，命中即生效并显示「依据」，可一键采用，全部本地存储；② 参考知识与规则——随 AI 请求发送给当前服务商的参考资料，对全部服务商一致生效。" />
         </h2>
       </div>
 
@@ -172,6 +176,9 @@ export default function RuleManage() {
         onClose={() => setAuditOpen(false)}
         onChanged={() => void refreshAudit()}
       />
+
+      {/* —— 参考知识与规则（知识库合并于此：给 AI 的参考规则，随请求发送，全服务商生效） —— */}
+      <KnowledgePanel />
     </div>
   );
 }

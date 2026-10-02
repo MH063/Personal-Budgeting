@@ -29,7 +29,7 @@ function ThemedToaster() {
   const theme = useUIStore((s) => s.theme);
   return (
     <Toaster
-      position="top-center"
+      position="bottom-right"
       theme={theme}
       closeButton
       toastOptions={{

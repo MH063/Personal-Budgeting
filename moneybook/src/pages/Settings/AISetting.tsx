@@ -1,8 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { useAIStore } from '@/stores/useAIStore';
-import { useKnowledgeStore, type KnowledgeEntry } from '@/stores/useKnowledgeStore';
-import { validateConfigWith } from '@/api/llm';
+import { validateConfigWith, loadAiUsage, type AiUsageStat } from '@/api/llm';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select, type SelectOption } from '@/components/ui/select';
@@ -11,6 +10,7 @@ import { Modal } from '@/components/ui/modal';
 import { Hint } from '@/components/ui/hint';
 import { ConfirmDialog } from '@/components/common/ConfirmDialog';
 import { maskKey } from '@/api/encrypt';
+import { openExternal } from '@/lib/update';
 import {
   fetchModels,
   getPreset,
@@ -146,9 +146,6 @@ export default function AISetting() {
    * 都以它为准，避免「指针为空时界面无法说明哪条在生效」。
    */
   const effectiveActiveId = activeProviderId || providers[0]?.id || '';
-  // 当前生效凭证是否为 DeepSeek（余额/知识库仅 DeepSeek 提供）
-  const activeProvider = providers.find((p) => p.id === effectiveActiveId);
-  const isDeepSeek = !!activeProvider && isDeepSeekHost(activeProvider.baseURL);
 
   // ---- 服务商变体 base_url 计算 ----
   const baseUrlVariants = getBaseUrlVariants(preset);
@@ -357,6 +354,14 @@ export default function AISetting() {
     }
     await updateProvider(sel.id, patch);
     pendingDraftIdRef.current = null; // 已保存：草稿转正，后续关闭不再清理
+    // 保存成功后以「当前表单」为新基线（历史 Bug 修复）：
+    // 1) originalKeyRef 同步为保存后的明文 Key 与密文；
+    // 2) Key 输入框归位为掩码显示。
+    // 否则关闭弹窗时 isEditDirty 会把「已保存的 Key/字段」与旧基线比较，
+    // 将已保存的内容误判为未保存修改，弹出多余的拦截确认。
+    const savedKeyPlain = eff || orig.key;
+    originalKeyRef.current = { id: sel.id, key: savedKeyPlain, enc: patch.apiKeyEnc ?? '' };
+    setApiKeyInput(savedKeyPlain ? maskKey(savedKeyPlain) : '');
     setSaving(false);
     toast.success('已保存（Key 已加密存储）');
     return true;
@@ -516,6 +521,10 @@ export default function AISetting() {
               <Select value={addPresetId} onChange={setAddPresetId} options={presetOptions} />
             </div>
             <Button size="sm" onClick={onAddProvider}>+ 添加凭证</Button>
+            {/* 重置全部 AI 配置：置于添加凭证右侧，便于就近发现；真正执行前有二次验证 */}
+            <Button size="sm" variant="outline" onClick={() => setResetConfirmOpen(true)}>
+              重置全部 AI 配置（清除 Key）
+            </Button>
           </div>
         </div>
 
@@ -528,41 +537,48 @@ export default function AISetting() {
             {/* 凭证目录按创建时间排序；激活项为「激活指针」，切换只改指针、旧凭证完整保留 */}
             {[...providers].sort((a, b) => ((b.createdAt ?? '') < (a.createdAt ?? '') ? -1 : (b.createdAt ?? '') > (a.createdAt ?? '') ? 1 : 0)).map((p) => {
               // 「当前」以真正生效的凭证为准（显式激活指针优先，未选择时回退目录首条），
-              // 与 readAIConfig / 余额面板口径一致，避免界面上没有一条被标为「当前」
+              // 与 readAIConfig 口径一致，避免界面上没有一条被标为「当前」
               const isActive = p.id === effectiveActiveId;
-              const keyDisplay = p.apiKeyEnc
-                ? (p.apiKey ? maskKey(p.apiKey) : '已加密')
-                : '未配置';
               const displayName = p.displayName || p.name || '未命名凭证';
               return (
-                <li key={p.id} className="flex items-center gap-3 py-2.5">
-                  <StatusDot status={p.status} />
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-sm font-medium">
-                      {displayName}
-                      {isActive && <span className="ml-2 rounded bg-[var(--color-primary)]/15 px-1.5 py-0.5 text-[10px] text-[var(--color-primary-fg)]">当前</span>}
+                <li key={p.id} className="py-2.5">
+                  <div className="flex items-center gap-3">
+                    <StatusDot status={p.status} />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-sm font-medium">
+                        {displayName}
+                        {isActive && <span className="ml-2 rounded bg-[var(--color-primary)]/15 px-1.5 py-0.5 text-[10px] text-[var(--color-primary-fg)]">当前</span>}
+                      </span>
+                      {/* 精简展示：模型版本 + 服务商（不再展示 Key 密文，避免隐私冗余）；模型名为关键信息，
+                          禁用 truncate 截断（用户反馈显示不全），超长时换行完整展示 */}
+                      <span className="block break-words text-xs text-muted" title={`${p.model || '未选模型'} · ${p.name}`}>
+                        {p.model || '未选模型'} · {p.name}
+                      </span>
                     </span>
-                    <span className="block truncate text-xs text-muted">
-                      {keyDisplay} · {p.model || '未选模型'} · {p.name}
+                    {/* 本地用量（零成本统计）：调用次数 / 累计 Tokens / 本月 Tokens */}
+                    <span className="hidden shrink-0 text-right text-xs text-muted sm:block">
+                      <UsageLine pid={p.id} />
                     </span>
-                  </span>
-                  <Button size="sm" variant="outline" onClick={() => { setSelId(p.id); setEditOpen(true); }}>
-                    {editOpen && p.id === selId ? '编辑中' : '编辑'}
-                  </Button>
-                  {!isActive && (
-                    <Button size="sm" variant="outline" onClick={() => { setActiveProvider(p.id); toast.success(`已切换到「${displayName}」`); }}>设为当前</Button>
-                  )}
-                  <Button
-                    size="sm"
-                    variant="danger"
-                    disabled={isActive && providers.length > 1}
-                    onClick={() => {
-                      const ok = removeProvider(p.id);
-                      if (ok) toast.success('已删除该凭证');
-                    }}
-                  >
-                    {isActive && providers.length > 1 ? '先切换再删' : '删除'}
-                  </Button>
+                    <Button size="sm" variant="outline" onClick={() => { setSelId(p.id); setEditOpen(true); }}>
+                      {editOpen && p.id === selId ? '编辑中' : '编辑'}
+                    </Button>
+                    {!isActive && (
+                      <Button size="sm" variant="outline" onClick={() => { setActiveProvider(p.id); toast.success(`已切换到「${displayName}」`); }}>设为当前</Button>
+                    )}
+                    <Button
+                      size="sm"
+                      variant="danger"
+                      disabled={isActive && providers.length > 1}
+                      onClick={() => {
+                        const ok = removeProvider(p.id);
+                        if (ok) toast.success('已删除该凭证');
+                      }}
+                    >
+                      {isActive && providers.length > 1 ? '先切换再删' : '删除'}
+                    </Button>
+                  </div>
+                  {/* 当前生效的 DeepSeek 凭证：余额自动查询（免费接口）+ 5 分钟自动刷新 */}
+                  {isActive && isDeepSeekHost(p.baseURL) && <DeepSeekBalanceInline providerId={p.id} />}
                 </li>
               );
             })}
@@ -621,18 +637,23 @@ export default function AISetting() {
                 />
               </div>
               <div className="mt-1.5 flex items-center gap-4 text-xs">
+                {/* Tauri WebView 内原生 a[target=_blank] 无法唤起系统浏览器，统一走 openExternal（Rust open_url） */}
                 <a
                   href={preset?.apiKeyUrl ?? '#'}
-                  target="_blank"
-                  rel="noopener noreferrer"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    if (preset?.apiKeyUrl) void openExternal(preset.apiKeyUrl);
+                  }}
                   className="text-[var(--color-primary-fg)] underline-offset-4 hover:underline"
                 >
                   官方获取 Key 页面 ↗
                 </a>
                 <a
                   href={preset?.docUrl ?? '#'}
-                  target="_blank"
-                  rel="noopener noreferrer"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    if (preset?.docUrl) void openExternal(preset.docUrl);
+                  }}
                   className="text-[var(--color-primary-fg)] underline-offset-4 hover:underline"
                 >
                   查看文档 ↗
@@ -736,21 +757,6 @@ export default function AISetting() {
         </Modal>
       )}
 
-      {/* 余额面板仅 DeepSeek 提供（DeepSeek 独有 /user/balance 接口，属真实能力差异） */}
-      {isDeepSeek && <DeepSeekBalancePanel />}
-
-      {/* ===== 知识库：参考知识与规则（本地文档统一，全服务商生效） ===== */}
-      <KnowledgePanel />
-
-      <div className="flex items-center gap-2">
-        <Button
-          variant="outline"
-          onClick={() => setResetConfirmOpen(true)}
-        >
-          重置全部 AI 配置（清除 Key）
-        </Button>
-      </div>
-
       <ConfirmDialog
         open={resetConfirmOpen}
         title="重置全部 AI 配置"
@@ -801,249 +807,77 @@ export default function AISetting() {
   );
 }
 
+/** Token 数量友好格式化：≥1 万时以「x.x万」展示，否则原样。 */
+function fmtTokens(n: number): string {
+  return n >= 10_000 ? `${(n / 10_000).toFixed(1)}万` : String(n);
+}
+
 /**
- * DeepSeek 账户余额卡片：GET /user/balance 真实拉取，展示各币种总余额/充值余额/赠送余额。
- * 仅在当前激活凭证为 DeepSeek 时渲染（父级判断），数据全部为真实请求，无模拟。
+ * 本地用量行：读取 kv.aiUsage（零成本本地统计，无网络请求、不产生任何费用）。
+ * 展示「调用次数 / 累计 Tokens / 本月 Tokens」，10 秒轻量自刷新，无需人为刷新。
  */
-function DeepSeekBalancePanel() {
-  const [loading, setLoading] = useState(false);
-  const [data, setData] = useState<DeepSeekBalance | null>(null);
-  const [err, setErr] = useState('');
-
-  async function onLoad() {
-    setLoading(true);
-    setErr('');
-    setData(null);
-    try {
-      const res = await fetchBalance();
-      if (!res) {
-        setErr('当前不是 DeepSeek 凭证或未配置 Key');
-        return;
-      }
-      setData(res);
-      toast.success('查询余额成功');
-    } catch (e) {
-      setErr((e as Error).message);
-      toast.error((e as Error).message);
-    } finally {
-      setLoading(false);
-    }
-  }
-
+function UsageLine({ pid }: { pid: string }) {
+  const [stat, setStat] = useState<AiUsageStat | null>(null);
+  useEffect(() => {
+    const refresh = () => setStat(loadAiUsage(pid));
+    refresh();
+    const timer = setInterval(refresh, 10_000);
+    return () => clearInterval(timer);
+  }, [pid]);
+  if (!stat || (stat.requests === 0 && stat.tokens === 0)) return null;
   return (
-    <div className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-4">
-      <div className="mb-2 flex items-center justify-between">
-        <div className="flex items-center gap-1.5 text-sm font-semibold">
-          账户余额
-          <Hint text="查询 DeepSeek 账号剩余额度（GET /user/balance），仅本机请求、不存储结果。" />
-        </div>
-        <Button size="sm" variant="outline" onClick={onLoad} disabled={loading}>
-          {loading ? '查询中…' : '查询余额'}
-        </Button>
-      </div>
-      {err && <p className="text-sm" style={{ color: 'var(--color-danger)' }}>{err}</p>}
-      {data && (
-        <div className="space-y-1.5 text-sm">
-          <p className="text-xs text-muted">is_available：{data.is_available ? '是' : '否'}</p>
-          {data.balance_infos.map((b) => (
-            <div key={b.currency} className="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-lg border border-[var(--border)] p-2">
-              <span className="font-medium">{b.currency}</span>
-              <span>总余额：<b>{Number(b.total_balance).toFixed(2)}</b></span>
-              <span>充值余额：{Number(b.topped_up_balance).toFixed(2)}</span>
-              <span>赠送余额：{Number(b.granted_balance).toFixed(2)}</span>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
+    <span className="block">
+      调用 {stat.requests} 次 · 累计 {fmtTokens(stat.tokens)} · 本月 {fmtTokens(stat.monthTokens)}
+    </span>
   );
 }
 
 /**
- * 知识库（统一区块）：AI 分析的统一参考资料入口。
- * 设计（用户确认的「本地文档统一」方案）：所有参考内容都保存在本机，调用 AI 时随请求
- * 发送给当前生效的服务商——对 DeepSeek / OpenAI / 通义 / 智谱 / Ollama 等全部服务商一致生效，
- * 不再存在「云端参考文档仅 DeepSeek 可用」的限制（原 DeepSeek /files 面板已移除）。
- * 录入方式：① 手动添加/编辑文本条目；② 导入本地文档（txt / md / csv 等纯文本文件）。
+ * DeepSeek 账户余额行：GET /user/balance 真实拉取（免费接口，只读账户信息、不计费），
+ * 挂载即自动查询并每 5 分钟自动刷新，无需用户手动点击。
  */
-function KnowledgePanel() {
-  const entries = useKnowledgeStore((s) => s.entries);
-  const add = useKnowledgeStore((s) => s.add);
-  const update = useKnowledgeStore((s) => s.update);
-  const remove = useKnowledgeStore((s) => s.remove);
+function DeepSeekBalanceInline({ providerId }: { providerId: string }) {
+  const [data, setData] = useState<DeepSeekBalance | null>(null);
+  const [err, setErr] = useState('');
 
-  const [title, setTitle] = useState('');
-  const [content, setContent] = useState('');
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [editTitle, setEditTitle] = useState('');
-  const [editContent, setEditContent] = useState('');
-  const [importing, setImporting] = useState(false);
-  const docInputRef = useRef<HTMLInputElement>(null);
-
-  /** 允许导入的纯文本扩展名（不做 PDF/Word 二进制解析：易出错且需额外重依赖） */
-  const DOC_EXT = ['txt', 'md', 'markdown', 'csv', 'json', 'log', 'yaml', 'yml', 'ini'];
-  /** 单条知识内容上限（字符数）：超出即截断，避免超大文档撑爆 prompt、无谓消耗 Token */
-  const DOC_MAX_CHARS = 50000;
-
-  function onAdd() {
-    if (!title.trim() && !content.trim()) {
-      toast.error('请输入标题或内容');
-      return;
-    }
-    add({ title: title.trim() || '未命名知识', content: content.trim() });
-    setTitle('');
-    setContent('');
-    toast.success('已添加知识条目，写入后将随 AI 请求参与上下文');
-  }
-
-  /**
-   * 导入本地文档：读取纯文本文件内容作为知识条目（存本机 settings 表，随 AI 请求发送）。
-   * 全部服务商一致生效——注入逻辑在 llm.ts 的 knowledgeBlock()，与凭证服务商无关。
-   * 校验：① 扩展名白名单，拒收其它类型（含二进制）；② 内容含 NUL 视为二进制拒收；
-   * ③ 超长截断至 DOC_MAX_CHARS 并汇总提示，避免用户无感知地送出超大上下文。
-   */
-  async function onImportDocs(e: React.ChangeEvent<HTMLInputElement>) {
-    const files = Array.from(e.target.files ?? []);
-    e.target.value = '';
-    if (!files.length) return;
-    setImporting(true);
-    let okCount = 0;
-    let truncatedCount = 0;
-    const failed: string[] = [];
-    for (const f of files) {
-      const ext = f.name.split('.').pop()?.toLowerCase() ?? '';
-      if (!DOC_EXT.includes(ext)) {
-        failed.push(`${f.name}（仅支持 ${DOC_EXT.join('/')} 纯文本）`);
-        continue;
+  async function load() {
+    setErr('');
+    try {
+      const res = await fetchBalance();
+      if (!res) {
+        setErr('未配置 Key');
+        return;
       }
-      try {
-        const text = await f.text();
-        if (text.includes('\u0000')) {
-          failed.push(`${f.name}（疑似二进制文件）`);
-          continue;
-        }
-        const body = text.trim();
-        if (!body) {
-          failed.push(`${f.name}（内容为空）`);
-          continue;
-        }
-        const clipped = body.length > DOC_MAX_CHARS;
-        if (clipped) truncatedCount++;
-        add({ title: f.name, content: clipped ? body.slice(0, DOC_MAX_CHARS) : body });
-        okCount++;
-      } catch {
-        failed.push(`${f.name}（读取失败）`);
-      }
+      setData(res);
+    } catch (e) {
+      setErr((e as Error).message);
     }
-    setImporting(false);
-    if (okCount) {
-      toast.success(
-        `已导入 ${okCount} 个文档${truncatedCount ? `（其中 ${truncatedCount} 个超长已截断至 ${DOC_MAX_CHARS} 字符）` : ''}`
-      );
-    }
-    if (failed.length) toast.error(`未导入：${failed.join('；')}`);
   }
 
-  function startEdit(e: KnowledgeEntry) {
-    setEditingId(e.id);
-    setEditTitle(e.title);
-    setEditContent(e.content);
-  }
-
-  function onUpdate() {
-    if (editingId === null) return;
-    update(editingId, { title: editTitle.trim() || '未命名知识', content: editContent.trim() });
-    setEditingId(null);
-    toast.success('已保存知识条目');
-  }
-
-  const textareaCls =
-    'w-full rounded-md border border-[var(--border)] bg-[var(--bg)] px-2.5 py-1.5 text-sm outline-none focus:border-[var(--color-primary)]';
+  useEffect(() => {
+    void load();
+    const timer = setInterval(() => void load(), 5 * 60 * 1000);
+    return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [providerId]);
 
   return (
-    <div className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-4">
-      <div className="mb-3 flex items-start justify-between gap-3">
-        <div className="flex items-center gap-1.5 text-sm font-semibold">
-          知识库
-          <Hint text="参考资料仅保存在本机，调用 AI 时随请求发送给当前生效的服务商——对全部服务商一致生效。" />
-        </div>
-        <div className="flex shrink-0 items-center gap-2">
-          <input
-            ref={docInputRef}
-            type="file"
-            hidden
-            multiple
-            accept=".txt,.md,.markdown,.csv,.json,.log,.yaml,.yml,.ini"
-            onChange={onImportDocs}
-          />
-          <Button size="sm" variant="outline" onClick={() => docInputRef.current?.click()} disabled={importing}>
-            {importing ? '导入中…' : '导入文档'}
-          </Button>
-        </div>
-      </div>
-
-      {/* ---- 参考知识与规则（全服务商） ---- */}
-      <div className="mb-3 flex items-center gap-1.5 text-sm font-medium">
-        📝 参考知识与规则
-        <Hint text="可手动添加规则，或点右上角「导入文档」导入 txt / md / csv 等纯文本文件；内容会在 AI 对话时拼入系统提示。对全部服务商生效。" />
-      </div>
-
-      {/* 新增 */}
-      <div className="space-y-2 rounded-lg border border-dashed border-[var(--border)] p-3">
-        <Input
-          value={title}
-          onChange={(e) => setTitle(e.target.value)}
-          placeholder="标题（例：预算规则、记账偏好）"
-        />
-        <textarea
-          rows={2}
-          value={content}
-          onChange={(e) => setContent(e.target.value)}
-          placeholder="知识 / 规则内容…"
-          className={textareaCls}
-        />
-        <div className="flex justify-end">
-          <Button size="sm" onClick={onAdd}>添加知识</Button>
-        </div>
-      </div>
-
-      <div className="mt-3">
-        {entries.length === 0 ? (
-          <p className="py-3 text-center text-xs text-muted">暂无知识条目。可添加如「每月 20 号为房租扣款」「餐饮占比超 30% 需预警」等规则。</p>
-        ) : (
-          <ul className="divide-y divide-[var(--border)]">
-            {entries.map((e) => (
-              <li key={e.id} className="py-2">
-                {editingId === e.id ? (
-                  <div className="space-y-2">
-                    <Input value={editTitle} onChange={(ev) => setEditTitle(ev.target.value)} placeholder="标题" />
-                    <textarea
-                      rows={3}
-                      value={editContent}
-                      onChange={(ev) => setEditContent(ev.target.value)}
-                      className={textareaCls}
-                      placeholder="内容…"
-                    />
-                    <div className="flex justify-end gap-2">
-                      <Button size="sm" variant="outline" onClick={() => setEditingId(null)}>取消</Button>
-                      <Button size="sm" onClick={onUpdate}>保存</Button>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="flex items-start gap-2">
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate text-sm font-medium">{e.title}</span>
-                      <span className="block truncate text-xs text-muted">{e.content}</span>
-                    </span>
-                    <Button size="sm" variant="outline" onClick={() => startEdit(e)}>编辑</Button>
-                    <Button size="sm" variant="danger" onClick={() => { remove(e.id); toast.success('已删除'); }}>删除</Button>
-                  </div>
-                )}
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
+    <div className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1 rounded-lg border border-[var(--border)] bg-[var(--card)] px-3 py-1.5 text-xs">
+      <span className="font-medium text-[var(--color-primary-fg)]">账户余额</span>
+      {err && <span className="text-red-500">{err}</span>}
+      {data && (
+        <>
+          <span className="text-muted">is_available：{data.is_available ? '是' : '否'}</span>
+          {data.balance_infos.map((b) => (
+            <span key={b.currency} className="flex flex-wrap items-center gap-x-3">
+              <span className="font-medium">{b.currency}</span>
+              <span>总余额：<b>{Number(b.total_balance).toFixed(2)}</b></span>
+              <span>充值余额：{Number(b.topped_up_balance).toFixed(2)}</span>
+              <span>赠送余额：{Number(b.granted_balance).toFixed(2)}</span>
+            </span>
+          ))}
+        </>
+      )}
     </div>
   );
 }

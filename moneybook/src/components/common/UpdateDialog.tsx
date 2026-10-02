@@ -87,7 +87,7 @@ export function UpdateDialog() {
             )}
 
             <p className="text-xs text-muted">
-              点「立即更新」将在应用内自动下载并安装（签名校验通过后才会执行），完成后自动重启进入新版本；覆盖安装不会清理本机账本数据。
+              点「立即更新」将全程静默完成「下载 → 签名校验 → 安装 → 自动重启」，无需重新安装或手动操作，等待片刻自动进入新版本；你的配置、账户、分类与账本数据均完整保留。
             </p>
 
             <div className="flex flex-wrap justify-end gap-2 pt-1">
