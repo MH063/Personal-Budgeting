@@ -1,6 +1,6 @@
 [package]
 name = "moneybook"
-version = "1.0.4"
+version = "1.0.5"
 description = "个人记账桌面工具"
 edition = "2021"
 

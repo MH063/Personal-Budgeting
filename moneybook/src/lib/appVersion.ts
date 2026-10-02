@@ -9,7 +9,7 @@
  * 双轨制：对外版本 = V{MAJOR}.{MINOR}.{PATCH}；内部构建 = V{...}.{BUILD}（测试）。
  * 用户可见处只显示三段（测试版加「（测试）」标识，避免误用半成品）。
  */
-export const APP_VERSION = '1.0.4';
+export const APP_VERSION = '1.0.5';
 export const APP_BUILD = 0;
 export const APP_CHANNEL: 'stable' | 'test' = 'stable';
 
