@@ -59,3 +59,244 @@ input, textarea { user-select: text; }
 ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
 .dark ::-webkit-scrollbar-thumb { background: #475569; }
 .dark ::-webkit-scrollbar-thumb:hover { background: #64748b; }
+
+/* ==========================================================================
+   全局提示（sonner toast）统一为「四色 popup」卡片设计
+   参考设计：成功/警示/错误/信息四种类型，各含图标 + 消息 + 右侧灰色关闭按钮，
+   浅色主题使用参考原色；深色主题自动切换为深色版本保证可读性。
+   ========================================================================== */
+.app-toast {
+  min-width: 300px;
+  max-width: 380px;
+  border-radius: 4px !important;
+  padding: 6px 8px !important;
+  border: 1px solid !important;
+  box-shadow: 4px 4px 10px -10px rgba(0, 0, 0, 1) !important;
+  gap: 0.5rem !important;
+}
+/* 内容区占满剩余宽度：长文本自动换行完整显示，不被图标/关闭按钮挤压截断 */
+.app-toast [data-content] { flex: 1 1 auto; min-width: 0; }
+.app-toast-icon { margin: 0; flex-shrink: 0; }
+.app-toast-icon svg { width: 1.25rem; height: 1.25rem; }
+.app-toast-title { font-size: 14px; font-weight: 500; line-height: 1.5; white-space: normal; }
+.app-toast-desc { font-size: 13px; opacity: 0.92; }
+
+/* 关闭按钮：卡片内容区右侧的灰色 ×。
+   注意 sonner 把关闭按钮渲染为 toast 的第一个子元素（在图标/内容之前），
+   若不做处理会排在最左；这里用 order 强制排到最末 + margin-left:auto 推到最右，
+   从而呈现「图标 + 消息 …… ×」的参考设计布局。 */
+.app-toast-close {
+  position: static !important;
+  transform: none !important;
+  order: 99;
+  margin: 0 2px 0 auto;
+  background: transparent !important;
+  border: none !important;
+  border-radius: 4px !important;
+  color: #9ca3af;
+  height: 20px;
+  width: 20px;
+  flex-shrink: 0;
+}
+.app-toast-close:hover { background: rgba(0, 0, 0, 0.05) !important; color: #6b7280; }
+.dark .app-toast-close { color: #64748b; }
+.dark .app-toast-close:hover { background: rgba(255, 255, 255, 0.1) !important; color: #cbd5e1; }
+.app-toast-close svg { width: 0.9rem; height: 0.9rem; }
+.app-toast-close svg path { fill: currentColor; }
+
+/* —— 四种类型配色（浅色主题：参考设计原色） —— */
+.app-toast-success { background: #edfbd8 !important; border-color: #84d65a !important; color: #2b641e !important; }
+.app-toast-success .app-toast-icon { color: #84d65a !important; }
+.app-toast-warning { background: #fefce8 !important; border-color: #facc15 !important; color: #ca8a04 !important; }
+.app-toast-warning .app-toast-icon { color: #facc15 !important; }
+.app-toast-error { background: #fef2f2 !important; border-color: #f87171 !important; color: #991b1b !important; }
+.app-toast-error .app-toast-icon { color: #f87171 !important; }
+.app-toast-info { background: #eff6ff !important; border-color: #1d4ed8 !important; color: #1d4ed8 !important; }
+.app-toast-info .app-toast-icon { color: #1d4ed8 !important; }
+/* 普通提示（toast()）：中性卡片 */
+.app-toast-default { background: #f8fafc !important; border-color: #cbd5e1 !important; color: #334155 !important; }
+.app-toast-default .app-toast-icon { color: #64748b !important; }
+
+/* —— 深色主题适配（背景压暗、文字提亮，边框保留原色以便区分类型） —— */
+.dark .app-toast-success { background: #15240c !important; color: #a3e635 !important; }
+.dark .app-toast-success .app-toast-icon { color: #84d65a !important; }
+.dark .app-toast-warning { background: #241f04 !important; color: #fde047 !important; }
+.dark .app-toast-warning .app-toast-icon { color: #facc15 !important; }
+.dark .app-toast-error { background: #2a1010 !important; color: #fca5a5 !important; }
+.dark .app-toast-error .app-toast-icon { color: #f87171 !important; }
+.dark .app-toast-info { background: #0b1a33 !important; color: #93c5fd !important; }
+.dark .app-toast-info .app-toast-icon { color: #93c5fd !important; }
+.dark .app-toast-default { background: #1e293b !important; border-color: #475569 !important; color: #e2e8f0 !important; }
+.dark .app-toast-default .app-toast-icon { color: #94a3b8 !important; }
+
+/* ==========================================================================
+   AI 助手弹窗（参考设计：深色玻璃渐变容器 + 顶部状态条 + 底部输入工具条）
+   深色容器内覆写 CSS 变量，让弹窗内部既有组件（var(--border)/--muted/--card
+   等）自动适配深色背景，无需逐个组件改样式。
+   ========================================================================== */
+.ai-dialog {
+  /* 作用域内覆写：容器内文字/边框/卡片色全部切换到深色体系 */
+  --border: rgba(255, 255, 255, 0.14);
+  --muted: #a1a1aa;
+  --card: rgba(255, 255, 255, 0.06);
+  --fg: #f4f4f5;
+  --color-primary: #2f7fc4;
+  --color-primary-fg: #6fc0f0;
+  color: #f4f4f5;
+  background: linear-gradient(135deg, rgba(39, 39, 42, 0.94), rgba(9, 9, 11, 0.98)) !important;
+  border: 1px solid rgba(113, 113, 122, 0.4) !important;
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.35);
+}
+
+/* 顶部状态点（绿色呼吸灯） */
+.ai-status-dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 9999px;
+  background: #22c55e;
+  animation: ai-pulse 2s infinite;
+}
+@keyframes ai-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+
+/* 顶部徽标（凭证名 / 模型名） */
+.ai-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.25em 0.6em;
+  font-size: 0.75em;
+  font-weight: 500;
+  border-radius: 9999px;
+  background: rgba(39, 39, 42, 0.6);
+  color: #d4d4d8;
+  white-space: nowrap;
+  cursor: default;
+}
+.ai-badge-pro {
+  background: rgba(59, 130, 246, 0.12);
+  color: #60a5fa;
+  border: 1px solid rgba(59, 130, 246, 0.25);
+}
+
+/* —— 底部输入区（参考设计：黑色圆角输入框 + 底部工具条） —— */
+.ai-input-box {
+  display: flex;
+  flex-direction: column;
+  border-radius: 0.75rem;
+  background: rgba(0, 0, 0, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  transition: border-color 0.2s ease;
+}
+.ai-input-box:focus-within { border-color: rgba(96, 165, 250, 0.5); }
+
+.ai-input-textarea {
+  width: 100%;
+  min-height: 52px;
+  max-height: 200px;
+  border-radius: 0.75rem 0.75rem 0 0;
+  padding: 0.75rem 1rem;
+  background: transparent;
+  border: 0;
+  outline: 0;
+  resize: none;
+  font-size: 14px;
+  line-height: 1.5;
+  color: #f4f4f5;
+  scrollbar-width: none;
+}
+.ai-input-textarea::placeholder { color: rgba(255, 255, 255, 0.4); }
+.ai-input-textarea::-webkit-scrollbar { display: none; }
+
+.ai-input-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 3rem;
+  border-radius: 0 0 0.75rem 0.75rem;
+  background: rgba(0, 0, 0, 0.55);
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  padding: 0 0.5rem;
+}
+
+.ai-bar-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.375rem 0.625rem;
+  border-radius: 0.5rem;
+  /* 背景与输入区一致（透明），仅 hover 时浮起 */
+  background: transparent;
+  border: 0;
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+.ai-bar-btn:hover:not(:disabled) { background: rgba(255, 255, 255, 0.1); color: #fff; }
+.ai-bar-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+/* 动作按钮（参考设计里的 sky 色「Search」风格） */
+.ai-bar-btn-sky {
+  background: transparent;
+  color: #38bdf8;
+  border: 1px solid rgba(56, 189, 248, 0.35);
+}
+.ai-bar-btn-sky:hover:not(:disabled) { background: rgba(14, 165, 233, 0.25); color: #7dd3fc; }
+
+.ai-send-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.5rem;
+  border-radius: 0.5rem;
+  /* 背景与输入区一致（透明），仅 hover 时浮起 */
+  background: transparent;
+  border: 0;
+  color: rgba(255, 255, 255, 0.75);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+.ai-send-btn:hover:not(:disabled) { background: rgba(255, 255, 255, 0.15); color: #fff; }
+.ai-send-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+
+/* —— AI 弹窗顶部服务商 / 模型版本下拉（深色适配） —— */
+.ai-select {
+  background: rgba(39, 39, 42, 0.7);
+  color: #d4d4d8;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 0.5rem;
+  font-size: 12px;
+  padding: 0.25rem 0.5rem;
+  outline: none;
+  cursor: pointer;
+}
+.ai-select:focus { border-color: rgba(96, 165, 250, 0.5); }
+.ai-select option { background: #27272a; color: #e4e4e7; }
+
+/* —— 内联四色提示卡片（成功 / 警告 / 错误 / 信息），色值与 toast 四色体系一致 —— */
+.app-popup-success { background: #edfbd8; border-color: #84d65a; color: #2b641e; }
+.app-popup-warning { background: #fefce8; border-color: #facc15; color: #ca8a04; }
+.app-popup-error   { background: #fef2f2; border-color: #f87171; color: #991b1b; }
+.app-popup-info    { background: #eff6ff; border-color: #1d4ed8; color: #1d4ed8; }
+.app-popup-success,
+.app-popup-warning,
+.app-popup-error,
+.app-popup-info {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  border-radius: 0.75rem;
+  border: 1px solid;
+  padding: 0.625rem 0.875rem;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.app-popup-dot {
+  flex-shrink: 0;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 9999px;
+}
+.app-popup-success .app-popup-dot { background: #84d65a; }
+.app-popup-warning .app-popup-dot { background: #facc15; }
+.app-popup-error .app-popup-dot   { background: #f87171; }
+.app-popup-info .app-popup-dot    { background: #1d4ed8; }

@@ -6,6 +6,7 @@ import {
   genId,
   getPreset,
   PROVIDER_PRESETS,
+  fetchModels,
   type ProviderConfig,
   type ProviderPreset,
 } from '@/api/providers';
@@ -150,6 +151,10 @@ interface AIStore {
   /** 从数据库 settings 表重载偏好（由应用启动 hydrate 后调用，恢复持久化的凭证/参数） */
   hydrate: () => void;
   reset: () => void;
+  /** 服务商真实模型列表缓存（按 providerId 索引；仅内存，不持久化，打开弹窗时拉取刷新） */
+  modelCache: Record<string, string[]>;
+  /** 拉取指定服务商的真实模型列表并缓存；失败时保留预设精选列表兜底，不打扰用户 */
+  loadModels: (providerId: string, baseURL: string, apiKey: string) => Promise<void>;
 }
 
 /** 把持久化凭证映射为内存态 ProviderConfig（磁盘中不存明文 apiKey） */
@@ -197,6 +202,7 @@ export const useAIStore = create<AIStore>((set, get) => ({
     topP: persisted.topP,
     maxTokens: persisted.maxTokens,
     providers: mapProviders(persisted),
+    modelCache: {},
 
     addProvider: (preset) => {
       const id = genId();
@@ -310,6 +316,21 @@ export const useAIStore = create<AIStore>((set, get) => ({
       set({ ...defaultsPersisted() } as unknown as Partial<AIStore>);
       // 重置后同时清空 providers 内存态
       set({ providers: [] });
+    },
+
+    loadModels: async (providerId, baseURL, apiKey) => {
+      // 实时拉取服务商模型列表；结果覆盖该 providerId 的缓存（下拉据此展示真实模型）。
+      // 无凭证 / 预设缺失 / 网络失败时静默保留精选列表兜底，不影响弹窗使用。
+      const preset = getPreset(providerId);
+      if (!preset) return;
+      try {
+        const { models } = await fetchModels(baseURL, apiKey, preset);
+        if (models.length) {
+          set((s) => ({ modelCache: { ...s.modelCache, [providerId]: models } }));
+        }
+      } catch {
+        // 拉取失败：保持既有缓存或精选列表，静默处理
+      }
     },
   }));
 

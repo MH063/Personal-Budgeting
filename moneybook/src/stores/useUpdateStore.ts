@@ -83,6 +83,10 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
   },
 
   checkSilently: async () => {
+    // 浏览器预览环境（非 Tauri）下 GitHub 更新接口不可达且无法应用内更新，
+    // 直接跳过自动扫描，避免控制台出现 net::ERR_FAILED 噪音（打包为桌面应用后才会真正检查）。
+    const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+    if (!isTauri) return;
     // 已有弹窗/正在检查时不重复发起；未到 24h 节流窗口直接跳过
     if (get().checking || get().open) return;
     if (!shouldAutoCheck()) return;

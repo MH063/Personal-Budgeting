@@ -1,13 +1,15 @@
 import { useEffect } from 'react';
 import { cn } from '@/lib/utils';
 
-export function Modal({ open, onClose, title, children, wide, side }: {
+export function Modal({ open, onClose, title, children, wide, side, className }: {
   open: boolean;
   onClose: () => void;
   title?: string;
   children: React.ReactNode;
   wide?: boolean;
   side?: boolean;
+  /** 追加到弹窗容器的自定义类（用于覆盖默认卡片背景/边框，如 AI 助手的深色渐变容器） */
+  className?: string;
 }) {
   useEffect(() => {
     if (!open) return;
@@ -24,7 +26,8 @@ export function Modal({ open, onClose, title, children, wide, side }: {
       <div
         className={cn(
           'flex max-h-[80vh] w-full flex-col overflow-hidden rounded-xl bg-[var(--card)] shadow-2xl',
-          side ? 'h-full w-[460px] rounded-r-none' : wide ? 'max-w-2xl' : 'max-w-md'
+          side ? 'h-full w-[460px] rounded-r-none' : wide ? 'max-w-2xl' : 'max-w-md',
+          className
         )}
       >
         {title && (

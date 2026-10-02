@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { toast } from 'sonner';
 import { useAIStore } from '@/stores/useAIStore';
 import { useAiAssistantStore, type AssistantChatMsg } from '@/stores/useAiAssistantStore';
+import { getPreset } from '@/api/providers';
 import {
   buildAggregateContext,
   chatStream,
@@ -41,33 +42,125 @@ import { TX_TYPES } from '@/lib/constants';
 export default function AiAssistantDialog() {
   const open = useAiAssistantStore((s) => s.open);
   const close = useAiAssistantStore((s) => s.closeAssistant);
+  const hydrateChat = useAiAssistantStore((s) => s.hydrateChat);
   const enabled = useAIStore((s) => s.enabled);
+  // 生效凭证：显式激活，或未显式选择时回退到目录第一条（口径与 readAIConfig 一致）
+  const providers = useAIStore((s) => s.providers);
+  const activeProviderId = useAIStore((s) => s.activeProviderId);
+  const setActiveProvider = useAIStore((s) => s.setActiveProvider);
+  const updateProvider = useAIStore((s) => s.updateProvider);
+  const activeProvider = providers.find((p) => p.id === activeProviderId) ?? providers[0];
+  const loadModels = useAIStore((s) => s.loadModels);
+  const cachedModels = useAIStore((s) => (activeProvider ? s.modelCache[activeProvider.providerId] ?? EMPTY_MODELS : EMPTY_MODELS));
+  // 模型候选：优先真实拉取列表（打开弹窗时自动刷新），失败回退预设精选；自定义模型名前置展示
+  const presetModels = activeProvider ? getPreset(activeProvider.providerId)?.models ?? [] : [];
+  const baseModels = cachedModels.length ? cachedModels : presetModels;
+  const modelOptions = activeProvider?.model
+    ? baseModels.includes(activeProvider.model)
+      ? baseModels
+      : [activeProvider.model, ...baseModels]
+    : baseModels;
   const [tab, setTab] = useState<'chat' | 'book'>('chat');
 
+  // 弹窗常驻挂载于 AppShell：应用启动 / 刷新后从数据库（settings 表）恢复对话历史，
+  // 不使用 localStorage（项目约定见 api/kv.ts）。仅挂载时执行一次。
+  useEffect(() => {
+    void hydrateChat();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // 弹窗可用（已开启 AI 且凭证就绪）时，拉取服务商真实模型列表刷新「模型版本」下拉；
+  // 真实列表优先展示，网络失败自动回退预设精选，不影响弹窗使用。
+  useEffect(() => {
+    if (enabled && activeProvider?.apiKey) {
+      void loadModels(activeProvider.providerId, activeProvider.baseURL, activeProvider.apiKey);
+    }
+    // 仅在凭证身份或密钥变化时重新拉取
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enabled, activeProvider?.id, activeProvider?.apiKey]);
+
   return (
-    <Modal open={open} onClose={close} title="AI 助手" wide>
-      <div className="mb-3 flex items-center gap-2 border-b border-[var(--border)] pb-2">
+    // className="ai-dialog"：覆盖 Modal 默认卡片，改为参考设计的深色玻璃渐变容器
+    <Modal open={open} onClose={close} wide className="ai-dialog">
+      {/* 顶部状态条（参考设计：状态点 + 标题 + 服务商/模型切换 + 关闭） */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <span className="ai-status-dot" />
+          <span className="text-sm font-medium" style={{ color: '#e4e4e7' }}>AI 助手</span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          {enabled && activeProvider ? (
+            <>
+              {/* 服务商切换：多凭证可直接在弹窗内切换大模型服务商 */}
+              <select
+                value={activeProvider.id}
+                onChange={(e) => setActiveProvider(e.target.value)}
+                className="ai-select"
+                title="切换服务商"
+              >
+                {providers.map((p) => (
+                  <option key={p.id} value={p.id}>{p.displayName || p.name}</option>
+                ))}
+              </select>
+              {/* 模型版本切换：预设模型列表 + 当前自定义模型名 */}
+              <select
+                value={activeProvider.model || ''}
+                onChange={(e) => void updateProvider(activeProvider.id, { model: e.target.value })}
+                className="ai-select"
+                title="切换模型版本"
+              >
+                <option value="">（默认模型）</option>
+                {modelOptions.map((m) => (
+                  <option key={m} value={m}>{m}</option>
+                ))}
+              </select>
+            </>
+          ) : (
+            <Link to="/settings?tab=ai" onClick={close} className="ai-badge ai-badge-pro">未开启 · 去设置</Link>
+          )}
+          <button
+            type="button"
+            onClick={close}
+            title="关闭"
+            className="ml-1 rounded p-1 hover:bg-white/10"
+            style={{ color: '#71717a' }}
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" className="h-4 w-4" aria-hidden="true">
+              <path fill="currentColor" d="m15.8333 5.34166-1.175-1.175-4.6583 4.65834-4.65833-4.65834-1.175 1.175 4.65833 4.65834-4.65833 4.6583 1.175 1.175 4.65833-4.6583 4.6583 4.6583 1.175-1.175-4.6583-4.6583z" />
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      {/* Tab 导航（跳转设置页前先关闭弹窗，避免弹窗残留遮挡设置页） */}
+      <div className="mt-2 flex items-center gap-2 border-b border-white/10 pb-2">
         <TabBtn active={tab === 'chat'} onClick={() => setTab('chat')}>对话 / 报告</TabBtn>
         <TabBtn active={tab === 'book'} onClick={() => setTab('book')}>自然语言记账</TabBtn>
-        {/* 跳转设置页前先关闭弹窗，避免弹窗残留遮挡设置页（用户反馈） */}
-        <Link to="/settings?tab=ai" onClick={close} className="ml-auto text-xs text-muted hover:underline">
+        <Link to="/settings?tab=ai" onClick={close} className="ml-auto text-xs hover:underline" style={{ color: '#a1a1aa' }}>
           {enabled ? 'AI 设置 →' : '开启 AI →'}
         </Link>
       </div>
-      {tab === 'chat' ? (
-        <ChatTab enabled={enabled} />
-      ) : enabled ? (
-        <BookTab />
-      ) : (
-        <div className="rounded-xl border border-dashed border-[var(--border)] p-4">
-          <div className="font-semibold">🤖 自然语言记账需要先开启 AI</div>
-          <div className="mt-1 text-sm text-muted">
-            开启并配置凭证后，可直接输入「午饭 25 元 用微信支付」等语句自动解析成账。
-            未开启 AI 不影响手动记账与本地问答（左侧「对话 / 报告」Tab 的快捷问答始终可用）。
-          </div>
-          <Link to="/settings?tab=ai" onClick={close} className="mt-2 inline-block text-sm" style={{ color: 'var(--color-primary)' }}>去开启 →</Link>
+
+      <div className="pt-3">
+        {/* 两个 Tab 常驻挂载、仅切换显隐：保证一方正在进行的 AI 请求不会因切换 Tab 被中断 */}
+        <div className={tab === 'chat' ? '' : 'hidden'}>
+          <ChatTab enabled={enabled} />
         </div>
-      )}
+        <div className={tab === 'book' ? '' : 'hidden'}>
+          {enabled ? (
+            <BookTab />
+          ) : (
+            <div className="rounded-xl border border-dashed border-white/15 p-4">
+              <div className="font-semibold" style={{ color: '#e4e4e7' }}>🤖 自然语言记账需要先开启 AI</div>
+              <div className="mt-1 text-sm" style={{ color: '#a1a1aa' }}>
+                开启并配置凭证后，可直接输入「午饭 25 元 用微信支付」等语句自动解析成账。
+                未开启 AI 不影响手动记账与本地问答（左侧「对话 / 报告」Tab 的快捷问答始终可用）。
+              </div>
+              <Link to="/settings?tab=ai" onClick={close} className="mt-2 inline-block text-sm" style={{ color: 'var(--color-primary-fg)' }}>去开启 →</Link>
+            </div>
+          )}
+        </div>
+      </div>
     </Modal>
   );
 }
@@ -77,6 +170,24 @@ export default function AiAssistantDialog() {
 // ---------------------------------------------------------------------------
 
 const QUICK_QUERIES = ['上个月花了多少', '上个月餐饮花了多少', '哪类支出增长最快', '这个月收入多少'];
+
+/** 空模型列表占位（模块级稳定引用）：selector 若每次返回新数组会触发 React 无限重渲染 */
+const EMPTY_MODELS: string[] = [];
+
+/** 专家指令在输入框内展示的确认话术（用户确认发送后才会真正调用 LLM） */
+const EXPERT_LABELS: Record<'report' | 'suggest' | 'diag' | 'forecast', string> = {
+  report: '请生成月度报告',
+  suggest: '请给出省钱建议',
+  diag: '请做财务体检',
+  forecast: '请预测下月',
+};
+/** 预算建议确认话术 */
+const BUDGET_LABEL = '预算建议·可写入';
+
+/** 待确认动作：点击快捷指令后先填入输入框，用户点发送 / 按 Enter 才执行 */
+type PendingAction =
+  | { kind: 'expert'; type: 'report' | 'suggest' | 'diag' | 'forecast' }
+  | { kind: 'budget' };
 
 function ChatTab({ enabled }: { enabled: boolean }) {
   // 由入口携带的分析锚点（月度体检可传用户选定的月份/维度）：体检与预测据此分析对应月份
@@ -88,11 +199,27 @@ function ChatTab({ enabled }: { enabled: boolean }) {
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [fimBusy, setFimBusy] = useState(false);
+  const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
-  // 卸载（切换 Tab / 关闭弹窗）时中止未完成的流式请求，避免无人查看时继续消耗 Tokens
+  // 卸载（关闭弹窗）时中止未完成的流式请求，避免无人查看时继续消耗 Tokens；
+  // 注意：切换 Tab 不卸载组件（常驻挂载），因此「对话/报告」与「自然语言记账」
+  // 可以同时各跑各的请求互不干扰。
   useEffect(() => () => { abortRef.current?.abort(); }, []);
+
+  // 弹窗关闭后被中止的消息会停在 pending；重新打开时把末尾 pending 消息标记为
+  // 「已停止生成」，避免界面永远显示打字光标（关闭即停止是本设计，重开不续跑）。
+  useEffect(() => {
+    const last = useAiAssistantStore.getState().msgs.at(-1);
+    if (last && last.role === 'assistant' && last.pending) {
+      setMsgs((prev) =>
+        prev.map((m, i) => (i === prev.length - 1 ? { ...m, content: m.content || '（已停止生成）', pending: false } : m))
+      );
+    }
+    // 仅挂载时兜底一次
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // 预算建议 → 一键写入 的本地面板状态（写入与撤销均在本地完成，不上传云端）
   const [budgetItems, setBudgetItems] = useState<BudgetProposalItem[]>([]);
@@ -124,6 +251,7 @@ function ChatTab({ enabled }: { enabled: boolean }) {
   /**
    * 普通问答：本地聚合先给确定答案；启用 AI 时强制走 LLM（仅脱敏聚合事实），
    * 失败自动回退本地。只带最近 6 条历史（单条截断 500 字）控制上送 token 量。
+   * 可被「停止」中断：中断后丢弃旧结果（不覆盖「已停止」标记）。
    */
   async function sendQuestion(text: string) {
     const t = text.trim();
@@ -132,14 +260,88 @@ function ChatTab({ enabled }: { enabled: boolean }) {
     const history = msgs.slice(-6).map((m) => ({ role: m.role, content: m.content.slice(0, 500) }));
     setMsgs((prev) => [...prev, { role: 'user', content: t }, { role: 'assistant', content: '', pending: true }]);
     setSending(true);
+    const ac = new AbortController();
+    abortRef.current = ac;
     try {
       const res = await answerFinancialQuestion(t, { history });
+      // 已被停止或新请求接管：丢弃旧结果，避免覆盖「已停止」标记
+      if (abortRef.current !== ac) return;
       settleLast({ content: res.answer, source: res.source });
     } catch (e) {
+      if (abortRef.current !== ac) return;
       settleLast({ content: `（回答失败：${(e as Error).message}）` });
     } finally {
+      if (abortRef.current === ac) abortRef.current = null;
       setSending(false);
     }
+  }
+
+  /** 点击快捷指令 → 仅填入输入框，等待用户确认发送（不直接触发 AI） */
+  function pickQuery(text: string) {
+    if (sending) return;
+    setPendingAction(null);
+    setInput(text);
+  }
+
+  /** 点击专家指令 → 填入确认话术并登记待执行动作，发送时按登记动作执行 */
+  function pickExpert(kind: 'report' | 'suggest' | 'diag' | 'forecast') {
+    if (!enabled) {
+      toast.info('请先在「AI 设置」中开启并配置凭证');
+      return;
+    }
+    if (sending) return;
+    setPendingAction({ kind: 'expert', type: kind });
+    setInput(EXPERT_LABELS[kind]);
+  }
+
+  /** 点击预算建议 → 填入确认话术并登记预算动作 */
+  function pickBudget() {
+    if (!enabled) {
+      toast.info('请先在「AI 设置」中开启并配置凭证');
+      return;
+    }
+    if (sending || budgetLoading) return;
+    setPendingAction({ kind: 'budget' });
+    setInput(BUDGET_LABEL);
+  }
+
+  /**
+   * 统一发送入口（Enter / 发送按钮共用）。
+   * 若输入框文字与登记的快捷话术一致 → 执行登记动作（专家指令 / 预算建议）；
+   * 用户改写文字后 → 视为普通问答发送，登记动作自动作废。
+   */
+  function sendCurrent() {
+    const t = input.trim();
+    if (!t || sending) return;
+    const action = pendingAction;
+    setInput('');
+    setPendingAction(null);
+    if (action?.kind === 'expert' && t === EXPERT_LABELS[action.type]) {
+      void sendExpert(action.type);
+      return;
+    }
+    if (action?.kind === 'budget' && t === BUDGET_LABEL) {
+      void runBudgetProposal();
+      return;
+    }
+    void sendQuestion(t);
+  }
+
+  /** 停止当前正在进行的生成（发送按钮在生成中变为「停止」按钮触发） */
+  function stopCurrent() {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    setSending(false);
+    setFimBusy(false);
+    setBudgetLoading(false);
+    // 末尾 pending 消息标记为已停止，保证不永远显示打字光标
+    setMsgs((prev) => {
+      const last = prev[prev.length - 1];
+      if (last && last.role === 'assistant' && last.pending) {
+        return prev.map((m, i) => (i === prev.length - 1 ? { ...m, content: m.content || '（已停止生成）', pending: false } : m));
+      }
+      return prev;
+    });
   }
 
   /** 专家指令（报告/建议/体检/预测）：单轮流式 LLM，数据为本地脱敏汇总 */
@@ -186,10 +388,26 @@ function ChatTab({ enabled }: { enabled: boolean }) {
     }
   }
 
-  // FIM 续写补全：用 DeepSeek /beta/completions 把当前输入续写成完整句子（仅 DeepSeek 凭证可用）
+  // FIM 续写补全：用 DeepSeek /beta/completions 把当前输入续写成完整句子（仅 DeepSeek 凭证可用）。
+  // 只补全「未写完的半句话」：完整指令 / 已用句末标点收尾的句子不续写，避免模型跑题续写新内容。
   async function continueText() {
     const s = input.trim();
     if (!s || fimBusy) return;
+    // 与快捷指令话术完全一致（如「请预测下月」「上个月花了多少」）：本身是完整指令，无需续写
+    const completeCmds = [...QUICK_QUERIES, ...Object.values(EXPERT_LABELS), BUDGET_LABEL];
+    if (completeCmds.includes(s)) {
+      toast.info('这是完整指令，无需续写补全');
+      return;
+    }
+    // 以中英文句末标点结尾：已是一句完整的话
+    if (/[。！？…；;!?]$/.test(s)) {
+      toast.info('当前输入已是一句完整的话，无需续写');
+      return;
+    }
+    if (s.length < 4) {
+      toast.info('请先输入更多内容再续写补全');
+      return;
+    }
     setFimBusy(true);
     try {
       const r = await completeFIM({ prompt: s, max_tokens: 96 });
@@ -213,6 +431,9 @@ function ChatTab({ enabled }: { enabled: boolean }) {
     setBudgetConfirming(false);
     setBudgetUndoToken(null);
     setBudgetStatus(null);
+    // 预算建议同样支持「停止」：登记到 abortRef，生成中发送按钮会变为停止按钮
+    const ac = new AbortController();
+    abortRef.current = ac;
     try {
       const { text, itemsMap } = await buildBudgetProposal();
       // 预算建议无需流式展示：onDelta 传空实现，仅取完整返回文本
@@ -221,8 +442,10 @@ function ChatTab({ enabled }: { enabled: boolean }) {
           { role: 'system', content: BUDGET_SYSTEM },
           { role: 'user', content: text },
         ],
-        { onDelta: () => {} }
+        { onDelta: () => {}, signal: ac.signal }
       );
+      // 已被停止或新请求接管：丢弃旧结果
+      if (abortRef.current !== ac) return;
       const recs = parseBudgetRecommendations(raw);
       const items = recs
         .map((r) => {
@@ -242,8 +465,11 @@ function ChatTab({ enabled }: { enabled: boolean }) {
       setBudgetItems(items);
       setBudgetChecked(items.map(() => true));
     } catch (e) {
+      // 用户主动停止不视为错误，仅丢弃结果
+      if (abortRef.current !== ac) return;
       setBudgetStatus({ kind: 'error', msg: (e as Error).message });
     } finally {
+      if (abortRef.current === ac) abortRef.current = null;
       setBudgetLoading(false);
     }
   }
@@ -309,7 +535,7 @@ function ChatTab({ enabled }: { enabled: boolean }) {
             <div key={i} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
               <div
                 className={`max-w-[85%] whitespace-pre-wrap rounded-xl px-3 py-2 leading-relaxed ${
-                  m.role === 'user' ? 'text-white' : 'border border-[var(--border)] bg-black/2 dark:bg-white/5'
+                  m.role === 'user' ? 'text-white' : 'border border-white/15 bg-white/5'
                 }`}
                 style={m.role === 'user' ? { background: 'var(--color-primary)' } : undefined}
               >
@@ -317,7 +543,7 @@ function ChatTab({ enabled }: { enabled: boolean }) {
                 {m.content}
                 {m.pending && <span className="ml-1 animate-pulse">▍</span>}
                 {m.role === 'assistant' && !m.pending && m.source && (
-                  <span className="ml-2 align-middle text-[10px] text-muted">{m.source === 'ai' ? 'AI' : '本地'}</span>
+                  <span className="ml-2 align-middle text-[10px]" style={{ color: '#8b8b96' }}>{m.source === 'ai' ? 'AI' : '本地'}</span>
                 )}
               </div>
             </div>
@@ -332,8 +558,10 @@ function ChatTab({ enabled }: { enabled: boolean }) {
             key={p}
             type="button"
             disabled={sending}
-            onClick={() => void sendQuestion(p)}
-            className="rounded-full border border-[var(--border)] px-2.5 py-0.5 text-xs text-muted hover:bg-black/5 disabled:opacity-50 dark:hover:bg-white/5"
+            // 快捷问句先填入输入框，由用户确认发送后才执行
+            onClick={() => pickQuery(p)}
+            className="rounded-full border border-white/15 px-2.5 py-0.5 text-xs hover:bg-white/10 disabled:opacity-50"
+            style={{ color: '#a1a1aa' }}
           >
             {p}
           </button>
@@ -342,20 +570,12 @@ function ChatTab({ enabled }: { enabled: boolean }) {
 
       {/* AI 分析快捷指令（需开启 AI；每次点击只发起一次请求，结果留在对话中可追问） */}
       <div className="mb-2 flex flex-wrap items-center gap-1.5">
-        <QuickChip disabled={!enabled || sending} onClick={() => void sendExpert('report')}>📄 月度报告</QuickChip>
-        <QuickChip disabled={!enabled || sending} onClick={() => void sendExpert('suggest')}>💡 省钱建议</QuickChip>
-        <QuickChip disabled={!enabled || sending} onClick={() => void sendExpert('diag')}>🩺 财务体检</QuickChip>
-        <QuickChip disabled={!enabled || sending} onClick={() => void sendExpert('forecast')}>🔮 下月预测</QuickChip>
-        <QuickChip disabled={!enabled || sending || budgetLoading} onClick={() => void runBudgetProposal()}>📋 预算建议·可写入</QuickChip>
-        {msgs.length > 0 && (
-          <button
-            type="button"
-            onClick={reset}
-            className="ml-auto rounded-full border border-[var(--color-danger)]/40 px-2.5 py-0.5 text-xs text-[var(--color-danger)] hover:opacity-80"
-          >
-            清空对话
-          </button>
-        )}
+        {/* 点击后只填入确认话术，用户确认发送后才真正调用 LLM（sendCurrent 按登记动作执行） */}
+        <QuickChip disabled={!enabled || sending} onClick={() => pickExpert('report')}>📄 月度报告</QuickChip>
+        <QuickChip disabled={!enabled || sending} onClick={() => pickExpert('suggest')}>💡 省钱建议</QuickChip>
+        <QuickChip disabled={!enabled || sending} onClick={() => pickExpert('diag')}>🩺 财务体检</QuickChip>
+        <QuickChip disabled={!enabled || sending} onClick={() => pickExpert('forecast')}>🔮 下月预测</QuickChip>
+        <QuickChip disabled={!enabled || sending || budgetLoading} onClick={pickBudget}>📋 预算建议·可写入</QuickChip>
       </div>
 
       {/* 预算建议面板（仅在触发后出现） */}
@@ -376,25 +596,77 @@ function ChatTab({ enabled }: { enabled: boolean }) {
         />
       )}
 
-      {/* 输入区 */}
-      <div className="mt-2 flex items-center gap-2">
-        <input
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter') void sendQuestion(input); }}
-          placeholder="追问：例如「那下个月呢？」"
-          className="h-9 flex-1 rounded-lg border border-[var(--border)] bg-[var(--card)] px-3 text-sm outline-none"
-        />
-        <Button variant="outline" size="sm" onClick={continueText} disabled={sending || fimBusy || !input.trim()}>
-          {fimBusy ? '补全中…' : '续写补全'}
-        </Button>
-        <Button size="sm" disabled={sending || !input.trim()} onClick={() => void sendQuestion(input)}>
-          {sending ? '思考中…' : '发送'}
-        </Button>
+      {/* 输入区（参考设计：黑色圆角输入框 + 底部工具条：左侧动作按钮、右侧清空/发送） */}
+      <div className="mt-3">
+        <div className="ai-input-box">
+          <textarea
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => {
+              // Enter 发送、Ctrl+Enter 换行（仅未按 Ctrl/Shift 时视为发送）
+              if (e.key === 'Enter' && !e.ctrlKey && !e.shiftKey) {
+                e.preventDefault();
+                void sendCurrent();
+              }
+            }}
+            placeholder="输入问题，例如「上个月餐饮花了多少」…"
+            className="ai-input-textarea"
+          />
+          <div className="ai-input-bar">
+            <div className="flex items-center gap-2">
+              {/* 续写补全：把当前输入续写成完整句子（仅 DeepSeek 凭证可用），sky 色风格按钮 */}
+              <button
+                type="button"
+                onClick={continueText}
+                disabled={sending || fimBusy || !input.trim()}
+                className="ai-bar-btn ai-bar-btn-sky"
+              >
+                <svg strokeLinejoin="round" strokeLinecap="round" strokeWidth={2} stroke="currentColor" fill="none" viewBox="0 0 24 24" className="h-4 w-4" aria-hidden="true">
+                  <circle r={10} cy={12} cx={12} />
+                  <path d="M2 12h20" />
+                  <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
+                </svg>
+                <span>{fimBusy ? '补全中…' : '续写补全'}</span>
+              </button>
+            </div>
+            <div className="flex items-center gap-1.5">
+              {msgs.length > 0 && (
+                <button type="button" onClick={reset} className="ai-bar-btn" title="清空对话">
+                  <svg strokeLinejoin="round" strokeLinecap="round" strokeWidth={2} stroke="currentColor" fill="none" viewBox="0 0 24 24" className="h-4 w-4" aria-hidden="true">
+                    <path d="M3 6h18" />
+                    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                    <path d="M10 11v6" />
+                    <path d="M14 11v6" />
+                  </svg>
+                  <span>清空</span>
+                </button>
+              )}
+              {/* 发送 / 停止二合一：生成中变为「停止」方块按钮，点击即中止当前请求 */}
+              <button
+                type="button"
+                onClick={sending ? stopCurrent : sendCurrent}
+                disabled={sending ? false : !input.trim()}
+                className="ai-send-btn"
+                title={sending ? '停止生成' : '发送'}
+              >
+                {sending ? (
+                  <svg strokeLinejoin="round" strokeLinecap="round" strokeWidth={2} stroke="currentColor" fill="none" viewBox="0 0 24 24" className="h-4 w-4" aria-hidden="true">
+                    <rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" stroke="none" />
+                  </svg>
+                ) : (
+                  <svg strokeLinejoin="round" strokeLinecap="round" strokeWidth={2} stroke="currentColor" fill="none" viewBox="0 0 24 24" className="h-4 w-4" aria-hidden="true">
+                    <path d="m22 2-7 20-4-9-9-4Z" />
+                    <path d="M22 2 11 13" />
+                  </svg>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+        <p className="mt-1.5 text-[10px]" style={{ color: '#71717a' }}>
+          连续对话共享上下文（仅带最近几条、单条截断，控制 token）；Enter 发送、Ctrl+Enter 换行；生成中点击右侧按钮可停止；启用 AI 时自动接入，仅上送脱敏聚合事实，不含单笔明细。
+        </p>
       </div>
-      <p className="mt-1.5 text-[10px] text-muted">
-        连续对话共享上下文（仅带最近几条、单条截断，控制 token）；启用 AI 时自动接入，仅上送脱敏聚合事实，不含单笔明细。
-      </p>
     </div>
   );
 }
@@ -516,30 +788,64 @@ function BookTab() {
 
   return (
     <div className="space-y-2">
-      <textarea
-        value={input}
-        onChange={(e) => setInput(e.target.value)}
-        rows={2}
-        placeholder="例：午饭 25 元 用微信支付；可一句多条，如「打车 32 元，买菜 68 元」"
-        className="w-full resize-none rounded-lg border border-[var(--border)] bg-transparent px-3 py-2 text-sm outline-none"
-      />
-      <div className="flex flex-wrap items-center gap-2">
-        <Button onClick={runParse} disabled={parsing || !input.trim()}>{parsing ? '解析中…' : '解析记账'}</Button>
-        {parsing && <Button variant="outline" onClick={cancelParse}>取消</Button>}
-        {pendingList.length > 0 && (
-          <>
-            <Button
-              onClick={confirmBook}
-              disabled={busy || pendingList.some((it) => (it.type === 'transfer' ? it.toAccountId == null : it.accountId == null))}
-              title={pendingList.some((it) => (it.type === 'transfer' ? it.toAccountId == null : it.accountId == null)) ? '存在账户未匹配的条目，请修正后再确认' : undefined}
+      {/* 输入区与「对话 / 报告」保持同一套参考设计：黑色圆角输入框 + 底部工具条 */}
+      <div className="ai-input-box">
+        <textarea
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => {
+            // Enter 解析记账、Ctrl+Enter 换行（与对话 / 报告输入区一致）
+            if (e.key === 'Enter' && !e.ctrlKey && !e.shiftKey) {
+              e.preventDefault();
+              void runParse();
+            }
+          }}
+          placeholder="例：午饭 25 元 用微信支付；可一句多条，如「打车 32 元，买菜 68 元」"
+          className="ai-input-textarea"
+        />
+        <div className="ai-input-bar">
+          <div className="flex flex-wrap items-center gap-1.5">
+            {pendingList.length > 0 && (
+              <>
+                <Button
+                  size="sm"
+                  onClick={confirmBook}
+                  disabled={busy || pendingList.some((it) => (it.type === 'transfer' ? it.toAccountId == null : it.accountId == null))}
+                  title={pendingList.some((it) => (it.type === 'transfer' ? it.toAccountId == null : it.accountId == null)) ? '存在账户未匹配的条目，请修正后再确认' : undefined}
+                >
+                  {busy ? '记账中…' : `确认记账（${pendingList.length} 笔）`}
+                </Button>
+                <Button size="sm" variant="outline" onClick={() => setPendingList([])}>放弃</Button>
+              </>
+            )}
+            {bookError && <Button size="sm" variant="outline" onClick={() => { setBookError(''); void runParse(); }}>重试</Button>}
+          </div>
+          <div className="flex items-center gap-1.5">
+            {/* 右侧主按钮：解析记账 / 停止解析二合一（与对话 / 报告发送按钮行为一致） */}
+            <button
+              type="button"
+              onClick={parsing ? cancelParse : runParse}
+              disabled={parsing ? false : !input.trim()}
+              className="ai-send-btn"
+              title={parsing ? '停止解析' : '解析记账'}
             >
-              {busy ? '记账中…' : `确认记账（${pendingList.length} 笔）`}
-            </Button>
-            <Button variant="outline" onClick={() => setPendingList([])}>放弃</Button>
-          </>
-        )}
-        {bookError && <Button variant="outline" onClick={() => { setBookError(''); void runParse(); }}>重试</Button>}
+              {parsing ? (
+                <svg strokeLinejoin="round" strokeLinecap="round" strokeWidth={2} stroke="currentColor" fill="none" viewBox="0 0 24 24" className="h-4 w-4" aria-hidden="true">
+                  <rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" stroke="none" />
+                </svg>
+              ) : (
+                <svg strokeLinejoin="round" strokeLinecap="round" strokeWidth={2} stroke="currentColor" fill="none" viewBox="0 0 24 24" className="h-4 w-4" aria-hidden="true">
+                  <path d="m22 2-7 20-4-9-9-4Z" />
+                  <path d="M22 2 11 13" />
+                </svg>
+              )}
+            </button>
+          </div>
+        </div>
       </div>
+      <p className="text-[10px]" style={{ color: '#71717a' }}>
+        Enter 解析记账、Ctrl+Enter 换行；解析中点击右侧按钮可停止；数据仅发送到你在设置中配置的接口。
+      </p>
 
       <BookOutcome
         parsing={parsing}
@@ -594,22 +900,25 @@ function BookOutcome({ parsing, pendingList, error, msg, onPatch }: {
 }) {
   if (parsing) {
     return (
-      <div className="mt-3 rounded-lg border border-[var(--border)] p-3 text-sm text-muted">
-        AI 解析中…（可点击「取消」中断，数据仅发送到你在设置中配置的接口）
+      <div className="app-popup-info mt-3">
+        <span className="app-popup-dot" />
+        <span>AI 解析中…（可点击「停止」中断，数据仅发送到你在设置中配置的接口）</span>
       </div>
     );
   }
   if (msg) {
     return (
-      <div className="mt-3 rounded-lg border border-[var(--border)] p-3 text-sm" style={{ color: 'var(--color-success)' }}>
-        {msg}
+      <div className="app-popup-success mt-3">
+        <span className="app-popup-dot" />
+        <span>{msg}</span>
       </div>
     );
   }
   if (error) {
     return (
-      <div className="mt-3 rounded-lg border border-[var(--border)] p-3 text-sm" style={{ color: 'var(--color-danger)' }}>
-        {error}（可修改描述后点击「重试」，或改用手动记账）
+      <div className="app-popup-error mt-3">
+        <span className="app-popup-dot" />
+        <span>{error}（可修改描述后点击「重试」，或改用手动记账）</span>
       </div>
     );
   }

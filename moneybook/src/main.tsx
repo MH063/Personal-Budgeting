@@ -19,10 +19,36 @@ const queryClient = new QueryClient({
   },
 });
 
-/** 订阅主题，让 sonner toast 跟随深色主题（浅色 toast 在白底深色页面会很突兀） */
+/**
+ * 全局提示（sonner）统一为「四色 popup」卡片设计：
+ * 成功/警示/错误/信息四种类型各自使用参考设计中的背景色、边框色、文字色与图标色，
+ * 关闭按钮为卡片右侧灰色 ×；深色主题下自动切换为深色版本保证可读性。
+ * 样式实现见 index.css 的 .app-toast-* 系列（main.tsx 只负责把类名挂到对应节点）。
+ */
 function ThemedToaster() {
   const theme = useUIStore((s) => s.theme);
-  return <Toaster position="top-center" richColors theme={theme} />;
+  return (
+    <Toaster
+      position="top-center"
+      theme={theme}
+      closeButton
+      toastOptions={{
+        duration: 4000,
+        classNames: {
+          toast: 'app-toast',
+          title: 'app-toast-title',
+          description: 'app-toast-desc',
+          icon: 'app-toast-icon',
+          closeButton: 'app-toast-close',
+          default: 'app-toast-default',
+          success: 'app-toast-success',
+          error: 'app-toast-error',
+          warning: 'app-toast-warning',
+          info: 'app-toast-info',
+        },
+      }}
+    />
+  );
 }
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
