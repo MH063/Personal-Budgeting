@@ -72,6 +72,28 @@ jobs:
         working-directory: moneybook
         run: npm run version:sync
 
+      - name: 提取更新说明（CHANGELOG 当前版本段落）
+        # 发布说明正文 = CHANGELOG.md 中「## v<版本号>」段落到下一个标题前的内容，
+        # 同时成为 GitHub Release 页面说明与应用内更新弹窗正文（latest.json 的 notes）。
+        # 这样用户看到的永远是「新增功能 / 修复问题 / 体验优化」，而非固定模板话术。
+        # 缺段落时直接报错终止发布（宁可失败也不发布无说明的版本）。
+        id: notes
+        shell: bash
+        run: |
+          cd moneybook
+          VERSION="${GITHUB_REF_NAME#v}"
+          NOTES=$(awk -v ver="v${VERSION}" 'BEGIN{f=0} index($0,"## " ver)==1{f=1; next} /^## /{if(f) exit} f{print}' CHANGELOG.md)
+          if [ -z "${NOTES//[[:space:]]/}" ]; then
+            echo "::error::CHANGELOG.md 缺少 ## v${VERSION} 段落，请先补充更新说明再打标签"
+            exit 1
+          fi
+          {
+            echo "notes<<EOF"
+            echo "$NOTES"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "已提取 v${VERSION} 更新说明（${#NOTES} 字符）"
+
       - name: 清理已存在的同名 Release（幂等重发）
         # 背景：GitHub 不允许向已发布的 Release 重复上传资产（immutable），首次构建
         # 失败或手动重跑时会残留同名 Release，导致后续上传报
@@ -100,12 +122,10 @@ jobs:
           projectPath: moneybook
           tagName: ${{ github.ref_name }}
           releaseName: '个人记账 ${{ github.ref_name }}'
-          releaseBody: |
-            个人记账桌面版 ${{ github.ref_name }}
-
-            - 覆盖安装不会清理本机账本数据（数据保存在本机数据目录）
-            - 已装用户可在应用内「设置 → 关于系统 → 检查更新」一键升级
-            - 安装包已使用 minisign 签名，应用内更新会自动校验签名后再安装
+          # 发布说明取自 CHANGELOG.md 当前版本段落（上方 notes step）：
+          # 展示新增功能 / 修复问题 / 体验优化，同时写入 latest.json 的 notes，
+          # 应用内「检查更新」弹窗即显示这些内容。
+          releaseBody: ${{ steps.notes.outputs.notes }}
           releaseDraft: true
           prerelease: false
           # 上传偶发失败时自动重试（应对 GitHub 侧瞬时异常）
