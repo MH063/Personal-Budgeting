@@ -84,7 +84,7 @@ export default function BackupRestore() {
       const raw = await exportAllData();
       const bundle = maskExportBundle(raw, inclSensitive); // 默认脱敏
       downloadJSON(`全部数据_${dayjs().format('YYYY-MM-DD')}${inclSensitive ? '_含敏感' : ''}.json`, bundle);
-      toast.success(inclSensitive ? '已导出全部数据（含敏感字段，请妥善保管）' : '已导出全部数据（备注/卡号等已脱敏）');
+      toast.success(inclSensitive ? '已导出全部数据（含敏感字段，请妥善保管）' : '已导出全部数据（备注/卡号等已脱敏；AI 密钥与操作日志不包含，恢复后需重新填写 AI 配置）');
     } catch (e) {
       toast.error(`导出失败：${(e as Error).message}`);
     }

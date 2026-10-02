@@ -7,6 +7,7 @@
 import dayjs from 'dayjs';
 import { execute, runInTransaction, select } from './db';
 import { currentLedgerId } from '@/lib/ledger';
+import { roundMoney } from '@/lib/money';
 import { listTransactionsDetailed } from './transactions';
 
 export type ReconcileStatus = 'draft' | 'locked';
@@ -291,8 +292,10 @@ export function buildLocalUnmatchedQuery(rec: Reconciliation, opts: LocalUnmatch
               )`;
   if (rec.period_start) { params.push(rec.period_start); cond += ` AND t.date >= $${params.length}`; }
   if (rec.period_end) { params.push(rec.period_end); cond += ` AND t.date <= $${params.length}`; }
-  const limit = opts.limit ?? 200;
-  const offset = opts.offset ?? 0;
+  // 数字类型防御：分页参数可能来自 UI 等外部调用，强制转为非负整数并夹紧范围，
+  // 防止 NaN/负数/字符串破坏 LIMIT/OFFSET 拼接（低危但易排查）。
+  const limit = Math.min(100000, Math.max(1, Math.floor(Number(opts.limit ?? 200) || 200)));
+  const offset = Math.max(0, Math.floor(Number(opts.offset ?? 0) || 0));
   const sql =
     `SELECT t.id AS transaction_id, t.date AS tx_date, t.amount AS tx_amount,
             t.note AS tx_note, a.name AS account_name
@@ -356,7 +359,7 @@ export async function reconDiffSummary(
   let net = rec?.opening_balance ?? 0;
   for (const m of matched) {
     const b = JSON.parse(m.bank_row) as BankRow;
-    net += (b.income - b.expense);
+    net = roundMoney(net + (b.income - b.expense)); // 每行取整到分，消除浮点尾差累积
   }
   return {
     bankUnmatched,
@@ -400,17 +403,20 @@ export async function completeReconciliation(recId: number, bankEndBalance: numb
     let calc = rec.opening_balance ?? 0;
     for (const m of matched) {
       const b = JSON.parse(m.bank_row) as BankRow;
-      calc += (b.income - b.expense);
+      calc = roundMoney(calc + (b.income - b.expense)); // 每行取整到分，消除浮点尾差累积
     }
-    const diff = Math.abs(calc - bankEndBalance);
+    // 差异同样归一到分：避免 0.30000000000000004 这类尾差导致误报「有差异」
+    const diff = Math.abs(roundMoney(calc - bankEndBalance));
 
+    // 差异超阈值：取消锁定（事务回滚全部标记），明确提示先处理差异。
+    // 原实现先 UPDATE 锁定再抛错——因事务回滚导致实际未锁定，却提示「锁定成功」，与事实相悖。
+    if (diff > 0.001) {
+      throw new Error(`推算期末余额 ${calc.toFixed(2)} 与银行余额 ${bankEndBalance.toFixed(2)} 差异 ${diff.toFixed(2)} 元，已取消锁定。请先核对差异后再完成对账。`);
+    }
     await execute(
       `UPDATE reconciliations SET bank_balance = $1, calc_balance = $2, diff_total = $3, status = 'locked' WHERE id = $4`,
       [bankEndBalance, calc, diff, recId]
     );
-    if (diff > 0.001) {
-      throw new Error(`锁定成功，但注意：推算期末余额 ${calc.toFixed(2)} 与银行余额 ${bankEndBalance.toFixed(2)} 差异 ${diff.toFixed(2)}，请复核。`);
-    }
   });
 }
 

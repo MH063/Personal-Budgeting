@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import dayjs from 'dayjs';
+import { toast } from 'sonner';
 import { PageHeader } from '@/components/common/PageHeader';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -9,6 +10,8 @@ import { formatMoney } from '@/lib/format';
 import { buildExpenseForecast } from '@/api/predict';
 import { buildSubscriptionReminders, nextDueDate, cancellationGuide } from '@/api/subscription';
 import { buildAnomalyReport } from '@/api/anomaly';
+import { buildDupReport, aiVerifyDuplicates, type DupSuspect, type DupVerdict } from '@/api/dupDetect';
+import { readAIConfig } from '@/stores/useAIStore';
 import { useAiAssistantStore } from '@/stores/useAiAssistantStore';
 import { buildHealthReview } from '@/api/healthScore';
 import { buildReport, type ReportResult } from '@/api/report';
@@ -22,7 +25,8 @@ import { getMoneyFlowAnalysis } from '@/api/moneyflow';
  *  - 支出预测与预算建议（predict）
  *  - 订阅 / 重复扣费到期提醒（subscription）
  *  - 反欺诈 / 异常交易（anomaly）
- * 全部为本地计算，无网络、不泄露数据。
+ *  - 疑似重复记账（dupDetect：本地候选 + 可选 AI 判定，识别「同商户不同订单号」的重复消费）
+ * 核心计算全部本地完成；仅用户主动触发「AI 判定」且允许明细时才上云（文本已脱敏）。
  */
 
 const TREND_META = {
@@ -39,6 +43,13 @@ const ANOMALY_LABEL: Record<string, { icon: string; label: string }> = {
 
 const SUB_CATEGORY_LABEL: Record<string, string> = {
   subscription: '订阅', housing: '住房', personal: '家庭转账', other: '其他',
+};
+
+/** 疑似重复判定的展示口径（dup=疑似重复 / ok=正常两笔 / uncertain=待核查） */
+const DUP_VERDICT_META: Record<DupVerdict, { icon: string; label: string; color: string }> = {
+  dup: { icon: '🔴', label: '疑似重复', color: '#EF4444' },
+  ok: { icon: '🟢', label: '正常消费', color: '#10B981' },
+  uncertain: { icon: '🟡', label: '待核查', color: '#F59E0B' },
 };
 
 export default function InsightsPage() {
@@ -60,12 +71,34 @@ export default function InsightsPage() {
   const f = forecast.data;
   const sub = subscription.data;
   const anom = anomaly.data ?? [];
+  // 疑似重复记账：默认本地启发式判定；用户点「AI 判定」后以 AI 结果覆盖展示
+  const dup = useQuery({ queryKey: ['insights', 'dup'], queryFn: () => buildDupReport() });
+  const [dupVerified, setDupVerified] = useState<DupSuspect[] | null>(null);
+  const [dupAiBusy, setDupAiBusy] = useState(false);
 
   const [report, setReport] = useState<ReportResult | null>(null);
   const [reporting, setReporting] = useState<'week' | 'month' | null>(null);
   const [cleanInput, setCleanInput] = useState('');
   const [cleanOut, setCleanOut] = useState(cleanTransaction(''));
   const [cleanTouched, setCleanTouched] = useState(false);
+
+  /** AI 判定疑似重复：仅当启用 AI 且允许明细时上云（文本脱敏），否则维持本地判定 */
+  async function aiVerifyDups() {
+    if (dupAiBusy) return;
+    const suspects = dupVerified ?? dup.data ?? [];
+    if (!suspects.length) return;
+    setDupAiBusy(true);
+    try {
+      const out = await aiVerifyDuplicates(suspects);
+      setDupVerified(out);
+      const dups = out.filter((s) => s.verdict === 'dup').length;
+      toast.success(`AI 判定完成：${dups} 条疑似重复、${out.length - dups} 条正常/待核查`);
+    } catch (e) {
+      toast.error(`AI 判定失败：${(e as Error).message}`);
+    } finally {
+      setDupAiBusy(false);
+    }
+  }
 
   async function genReport(period: 'week' | 'month') {
     if (reporting) return;
@@ -369,6 +402,47 @@ export default function InsightsPage() {
                 <span className="ml-2 text-[10px] text-[var(--color-primary-fg)]" title="可靠度＝按规则强度（z 值/次数）估算的启发式分数，非准确率">
                   可靠 {Math.round(a.reliability * 100)}%
                 </span>
+              </div>
+            ))}
+          </Card>
+        )}
+      </section>
+
+      {/* —— 疑似重复记账（识别「同商户不同订单号」的重复消费，可选 AI 判定） —— */}
+      <section>
+        <div className="mb-2 flex flex-wrap items-center gap-2">
+          <h3 className="font-semibold">🔎 疑似重复记账</h3>
+          <Button type="button" onClick={aiVerifyDups} disabled={dupAiBusy || (!(dupVerified ?? dup.data)?.length)}>
+            {dupAiBusy ? '判定中…' : '🤖 AI 判定'}
+          </Button>
+          <span className="text-xs text-muted">
+            {readAIConfig().enabled && readAIConfig().allowDetail
+              ? 'AI 判定将上云（文本已脱敏）；否则仅本地启发式'
+              : 'AI 未开启或未允许发送明细，当前仅本地启发式'}
+          </span>
+        </div>
+        {dup.isLoading ? (
+          <p className="text-sm text-muted">检测中…</p>
+        ) : (dupVerified ?? dup.data ?? []).length === 0 ? (
+          <p className="text-sm text-muted">未发现短时同商户疑似重复消费。</p>
+        ) : (
+          <Card className="divide-y divide-[var(--border)]">
+            {(dupVerified ?? dup.data ?? []).map((s) => (
+              <div key={s.key} className="px-4 py-2.5 text-sm">
+                <div className="flex flex-wrap items-center gap-2">
+                  <b>{s.a.payee || '未知商户'}</b>
+                  <span className="rounded bg-black/5 px-1.5 py-0.5 text-[10px] dark:bg-white/10" style={{ color: DUP_VERDICT_META[s.verdict].color }}>
+                    {DUP_VERDICT_META[s.verdict].icon} {DUP_VERDICT_META[s.verdict].label}
+                  </span>
+                  <span className="text-[10px] text-muted">
+                    可靠 {Math.round(s.reliability * 100)}% · {s.source === 'ai' ? 'AI 判定' : '本地启发式'}
+                  </span>
+                </div>
+                <div className="mt-1 space-y-0.5 text-xs text-muted">
+                  <div>① {s.a.date} · {formatMoney(s.a.amount)} · 订单号{s.a.orderNo ? ` ${s.a.orderNo}` : '：无'}</div>
+                  <div>② {s.b.date} · {formatMoney(s.b.amount)} · 订单号{s.b.orderNo ? ` ${s.b.orderNo}` : '：无'}</div>
+                </div>
+                <div className="mt-1 text-xs">{s.reason}</div>
               </div>
             ))}
           </Card>

@@ -68,19 +68,40 @@ export async function exportAllData(): Promise<ExportBundle> {
 const PII_TEXT_COLS = ['note', 'payee', 'pay_method', 'order_no', 'merchant_order_no'] as const;
 
 /**
- * 对导出包做脱敏（纯函数，可单测、复用 maskSensitive）：
- * 默认导出前对交易类的文本列走 maskSensitive（手机/卡号/邮箱/身份证等 PII 打码）。
- * inclSensitive 传 true 时保留原文（供"含敏感字段"二次确认后使用）。
+ * settings 表中含敏感配置的键（默认导出时剔除）：
+ *  - `kv.ai`：AI 提供商配置 JSON，内含加密的 API Key（apiKeyEnc，AES-GCM + 设备指纹派生密钥）。
+ *    虽为密文，但属隐私配置，默认导出不应携带（恢复后需重新填写密钥）。
+ * 其余 settings 键（导入规则、主题、备份提醒等）非敏感，默认导出保留。
+ */
+const SENSITIVE_SETTING_KEYS: readonly string[] = ['kv.ai'];
+
+/**
+ * 对导出包做脱敏与敏感表过滤（纯函数，可单测、复用 maskSensitive）。
+ *
+ * 与「含敏感」导出保持对称：inclSensitive=false（默认导出）时——
+ *  - 交易文本列（备注/收款方/付款方式/订单号/商家订单号）走 maskSensitive 打码 PII；
+ *  - settings 剔除 SENSITIVE_SETTING_KEYS（含 API Key 的配置项）；
+ *  - ai_audit_log（AI 操作日志，含请求/描述文本）整表剔除，不外泄；
+ * inclSensitive=true 时返回原文引用，供用户二次确认后的完整备份/迁移使用。
  */
 export function maskExportBundle(bundle: ExportBundle, inclSensitive = false): ExportBundle {
   if (inclSensitive) return bundle;
-  const txRows = (bundle.data.transactions ?? []) as Record<string, unknown>[];
-  const masked = txRows.map((r) => {
+  const data: Record<string, unknown[]> = { ...bundle.data };
+  // 1) 交易 PII 文本列脱敏
+  const txRows = (data.transactions ?? []) as Record<string, unknown>[];
+  data.transactions = txRows.map((r) => {
     const next = { ...r };
     for (const col of PII_TEXT_COLS) {
       if (typeof next[col] === 'string' && next[col]) next[col] = maskSensitive(next[col] as string);
     }
     return next;
   });
-  return { ...bundle, data: { ...bundle.data, transactions: masked } };
+  // 2) settings 剔除含 API Key 的敏感配置项（保留导入规则、主题等非敏感项）
+  const settingRows = (data.settings ?? []) as Record<string, unknown>[];
+  if (settingRows.length) {
+    data.settings = settingRows.filter((r) => !SENSITIVE_SETTING_KEYS.includes(String(r.key)));
+  }
+  // 3) AI 操作日志（含请求文本）整表剔除，避免经导出外泄
+  data.ai_audit_log = [];
+  return { ...bundle, data };
 }

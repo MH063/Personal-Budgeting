@@ -47,6 +47,12 @@ const { ensureDbAsync, ensureDbSync } = vi.hoisted(() => {
     );
     CREATE TABLE IF NOT EXISTS ledgers (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS account_holdings (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      account_id INTEGER NOT NULL, symbol TEXT DEFAULT '', name TEXT NOT NULL,
+      quantity REAL NOT NULL DEFAULT 0, cost REAL NOT NULL DEFAULT 0, price REAL NOT NULL DEFAULT 0,
+      note TEXT DEFAULT ''
+    );
   `;
   let db: any = null;
   let ready: Promise<any> | null = null;
@@ -199,9 +205,9 @@ describe('导入后余额重算（sql.js 真实 SQLite 端到端）', () => {
     expect(second).toEqual([]);
   });
 
-  it('排除投资与应收/应付：它们不参与流水重算', async () => {
+  it('应收/应付虚拟账户不参与重算；投资账户无流水与持仓时保持原值', async () => {
     await resetTables();
-    // 追加一个 storage investment + 一个 receivable 虚拟账户
+    // 追加一个 investment 投资账户 + 一个 receivable 虚拟账户
     await execute(`INSERT INTO accounts (name, type, balance, initial_balance, ledger_id)
       VALUES ('基金账户','investment',3000,3000,1), ('小李欠款','receivable',500,0,1)`);
     setCurrentLedger(1);
@@ -210,13 +216,36 @@ describe('导入后余额重算（sql.js 真实 SQLite 端到端）', () => {
     ];
     await bulkImportTransactions(rows, { autoCreate: false });
     const changed = await recalcAccountBalances();
-    // 仅真实账户（微信）被重算；投资/应收账户被排除
+    // 真实账户（微信）被重算；投资账户无流水/无持仓时现金不变；应收虚拟账户被排除
     expect(changed.map((c) => c.name)).toEqual(['微信']);
     const accs = await select<{ name: string; balance: number; type: string }>(`SELECT name, balance, type FROM accounts`);
     const inv = accs.find((a) => a.type === 'investment');
     const rec = accs.find((a) => a.type === 'receivable');
-    expect(inv?.balance).toBe(3000); // 保持用户/持仓逻辑给定的值，不被流水覆盖
+    expect(inv?.balance).toBe(3000); // 无流水、无持仓：重算后仍为 3000
     expect(rec?.balance).toBe(500);  // 由借贷同步维护，不被流水覆盖
+  });
+
+  it('投资账户参与重算：现金 = 初始 + Σ流水 − Σ持仓成本（补齐导入缺口）', async () => {
+    await resetTables();
+    await execute(`INSERT INTO accounts (name, type, balance, initial_balance, ledger_id)
+      VALUES ('基金账户','investment',0,0,1)`);
+    const [invAcc] = await select<{ id: number }>(`SELECT id FROM accounts WHERE name = '基金账户'`);
+    // 该账户已有持仓（成本 300，此前由 adjustCash 扣减现金且不产生流水）
+    await execute(`INSERT INTO account_holdings (account_id, name, quantity, cost, price) VALUES ($1, '沪深300', 3, 100, 110)`, [invAcc.id]);
+    setCurrentLedger(1);
+    // 导入一笔收入 1000 到投资账户（余额中性：导入后余额暂不更新）
+    const rows: ImportRow[] = [
+      makeRow({ date: '2026-09-01', type: 'income', amount: 1000, account: '基金账户', note: '转入资金', line: 1 }),
+    ];
+    await bulkImportTransactions(rows, { autoCreate: false });
+    const changed = await recalcAccountBalances();
+    // 现金 = 0 + 1000(流水收入) − 300(持仓成本) = 700
+    const inv = changed.find((c) => c.name === '基金账户');
+    expect(inv?.after).toBe(700);
+    // 余额已落库且再次重算幂等（不重复调整）
+    const accs = await select<{ name: string; balance: number }>(`SELECT name, balance FROM accounts WHERE name = '基金账户'`);
+    expect(Number(accs[0]?.balance)).toBe(700);
+    expect(await recalcAccountBalances()).toEqual([]);
   });
 
   it('已有同名账户时导入直接复用，不重复创建、不误报「创建失败」', async () => {

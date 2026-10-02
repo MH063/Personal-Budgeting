@@ -110,8 +110,13 @@ export async function deleteRecurring(id: number): Promise<void> {
   await execute(`DELETE FROM recurring_transactions WHERE id = $1`, [id]);
 }
 
+/** 单次启动补齐的周期数上限：防止「数年未打开 + 高频周期」一次性生成海量历史交易，超出部分下次启动再补 */
+const MAX_CATCHUP_PER_RUN = 60;
+
 /**
  * 生成所有已到期（next_run ≤ 今天）且启用的周期性交易，并推进 next_run（幂等）。
+ * 节奏：一次补齐该计划「错过」的全部周期（从 next_run 循环推进直到超过今天或 end_date），
+ * 而非只生成最近一笔——这样长时间未打开应用也不会留下历史缺口。
  * @returns 本次生成笔数
  */
 export async function applyDueRecurring(): Promise<number> {
@@ -124,24 +129,30 @@ export async function applyDueRecurring(): Promise<number> {
     );
     let count = 0;
     for (const r of due) {
-      const date = r.next_run as string;
-      if (r.type === 'transfer' && !r.to_account_id) continue; // 缺转入账户则跳过
-      await createTransaction({
-        type: r.type,
-        amount: r.amount,
-        categoryId: r.category_id ?? undefined,
-        accountId: r.account_id,
-        toAccountId: r.to_account_id ?? undefined,
-        date,
-        note: r.note || undefined,
-      });
-      count++;
-      // 计算下次触发
-      const nxt = computeNextOccurrence(date, r.frequency, r.interval);
-      if (r.end_date && nxt > r.end_date) {
-        await execute(`UPDATE recurring_transactions SET next_run = NULL, is_active = 0, last_run = $1 WHERE id = $2`, [date, r.id]);
-      } else {
+      if (r.type === 'transfer' && !r.to_account_id) continue; // 缺转入账户则跳过（不推进，保持原行为）
+      let date = r.next_run as string;
+      let guard = 0;
+      // 循环补齐：每笔生成后立即推进 next_run（幂等），直到超过今天或 end_date
+      while (date <= today && (!r.end_date || date <= r.end_date) && guard < MAX_CATCHUP_PER_RUN) {
+        await createTransaction({
+          type: r.type,
+          amount: r.amount,
+          categoryId: r.category_id ?? undefined,
+          accountId: r.account_id,
+          toAccountId: r.to_account_id ?? undefined,
+          date,
+          note: r.note || undefined,
+        });
+        count++;
+        guard++;
+        // 计算下次触发
+        const nxt = computeNextOccurrence(date, r.frequency, r.interval);
+        if (r.end_date && nxt > r.end_date) {
+          await execute(`UPDATE recurring_transactions SET next_run = NULL, is_active = 0, last_run = $1 WHERE id = $2`, [date, r.id]);
+          break;
+        }
         await execute(`UPDATE recurring_transactions SET next_run = $1, last_run = $2 WHERE id = $3`, [nxt, date, r.id]);
+        date = nxt;
       }
     }
     return count;

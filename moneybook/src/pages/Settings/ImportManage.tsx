@@ -6,10 +6,11 @@ import {
   buildColumnMap, parseAoaWithMap, IMPORT_FIELD_LABELS,
   type ImportRow, type ImportSmoke, type ColumnMap, type ImportFieldKey, type ImportRule,
 } from '@/api/import';
-import { loadImportRules, saveImportRules } from '@/api/importRules';
+import { loadImportRules, saveImportRules, pickRuleKeyword, shouldLearnCorrection, learnRuleFromCorrection, type LearnedRuleCandidate } from '@/api/importRules';
 import { recalcAccountBalances, updateTransaction } from '@/api/transactions';
 import { isZip, tryExtractZip, detectZipEncryption } from '@/api/importZip';
 import { recordImportLog, listImportLogs, type ImportLog } from '@/api/importLog';
+import { recordAudit } from '@/api/audit';
 import { suggestForText } from '@/api/aiSuggest';
 import { Button } from '@/components/ui/button';
 import { Hint } from '@/components/ui/hint';
@@ -86,6 +87,9 @@ export default function ImportManage() {
   // 用户自定义资金流向规则（存本机 settings，kv.importRules）
   const [rules, setRules] = useState<ImportRule[]>(() => loadImportRules());
   const [rulesOpen, setRulesOpen] = useState(false);
+  // 解析原值快照（rowKey → 解析时的 ImportRow）：导入时与修正后行对比，
+  // 识别「用户手动改动」以自动学习资金流向规则；AI 智能归类填充不算用户修正，一并更新基线
+  const origRowsRef = useRef<Map<string, ImportRow>>(new Map());
 
   // 载入导入历史（审计）
   useEffect(() => {
@@ -113,6 +117,8 @@ export default function ImportManage() {
     // 正常行排在前面，被跳过的行追加在尾部并做标记
     const merged = [...rows, ...skippedRows];
     setRows(merged);
+    // 建立「解析原值」基线：后续与用户修正后对比，识别手动改动以自动学习规则
+    origRowsRef.current = new Map(merged.map((r) => [rowKeyOf(r), r]));
     setParseWarn(warn);
     // 计算「将被自动创建」的账户（正常行 + 被恢复的跳过行都会用到，一并统计）
     const accNames = [...new Set(merged.map((r) => normalizeAccountName(r.account)).filter(Boolean))];
@@ -170,7 +176,7 @@ export default function ImportManage() {
       setColMap(map);
       setMapAoa(aoa);
     }
-    const p = parseAoaWithMap(aoa, map);
+    const p = parseAoaWithMap(aoa, map, 0, loadImportRules());
     return { rows: p.rows, skippedRows: [], warn: p.skipped.map((s) => `「${name}」跳过 1 行：${s}`) };
   }
 
@@ -191,24 +197,47 @@ export default function ImportManage() {
       const allSkipped: ImportRow[] = [];
       const allWarn: string[] = [];
       let needPwd: { file: File } | null = null;
+      // 行唯一标识盖章：rowKeyOf 默认用「文件内行号」，多文件合并时不同文件相同行号会互相覆盖，
+      // 导致自动学习基线 / 待核对定位错位——故按文件序号盖章，保证跨文件唯一
+      let fileIdx = 0;
+      const stampRows = (rows: ImportRow[]) => {
+        rows.forEach((r) => {
+          r._rowKey = `${fileIdx}:${r.line}${r._rowKey ? `:${r._rowKey}` : ''}`;
+        });
+      };
       for (const file of files) {
         const binary = new Uint8Array(await file.arrayBuffer());
         // 明文/非加密源文件（含 xlsx 本体的 zip）：直接解析
         if (!isZip(binary)) {
           const r = await parseSourceFile(file.name, binary, files.length);
-          if (r) { allRows.push(...r.rows); allSkipped.push(...r.skippedRows); allWarn.push(...r.warn); }
+          if (r) {
+            stampRows(r.rows); stampRows(r.skippedRows);
+            allRows.push(...r.rows); allSkipped.push(...r.skippedRows); allWarn.push(...r.warn);
+          }
+          fileIdx++;
           continue;
         }
         // zip：判断加密方式与解压
         const kind = detectZipEncryption(binary);
         if (kind?.aes) {
           allWarn.push(`「${file.name}」使用 WinZip AES 加密，本机暂不支持直接解密。请到导出端选择「明文」或「zip 密码版」重新导出。`);
+          fileIdx++;
           continue;
         }
         const ex = tryExtractZip(binary, pwd);
         if (ex.ok) {
           const r = await parseSourceFile(ex.name, ex.data, files.length);
-          if (r) { allRows.push(...r.rows); allSkipped.push(...r.skippedRows); allWarn.push(...r.warn); }
+          if (r) {
+            stampRows(r.rows); stampRows(r.skippedRows);
+            allRows.push(...r.rows); allSkipped.push(...r.skippedRows); allWarn.push(...r.warn);
+          }
+          fileIdx++;
+          continue;
+        }
+        // zip 炸弹防护：超过上限时给出专门提示，避免误导为「损坏/密码错误」
+        if (ex.reason === 'too_large') {
+          allWarn.push(`「${file.name}」压缩包超过安全上限（文件大小/条目数/解压体积），已拒绝解压。`);
+          fileIdx++;
           continue;
         }
         if (kind?.encrypted) {
@@ -217,6 +246,7 @@ export default function ImportManage() {
         } else {
           allWarn.push(`「${file.name}」该 zip 内容无法识别（可能已损坏），请重新导出明文。`);
         }
+        fileIdx++;
       }
 
       // 存在加密 zip 且未成功解密 → 弹出密码对话框（若用户刚在框里填过密码则提示错误）
@@ -263,7 +293,7 @@ export default function ImportManage() {
     if (!mapAoa) return;
     setBusy(true);
     try {
-      const p = parseAoaWithMap(mapAoa, colMap);
+      const p = parseAoaWithMap(mapAoa, colMap, 0, loadImportRules());
       const rows = p.rows.map((r, i) => ({ ...r, line: i + 1 }));
       await commitParsed(rows, p.skipped, '（已按列映射重新解析）');
     } catch (e) {
@@ -285,16 +315,18 @@ export default function ImportManage() {
 
   function downloadTemplate() {
     // 动态加载 xlsx 以生成模板（避免顶层静态引包影响首屏体积）
+    // 列与 IMPORT_FIELD_LABELS 的 12 个业务字段对齐（含支付时间/付款方式/收款方/订单号/商家订单号 5 个明细字段），
+    // 表头命名须能被 buildColumnMap 的别名自动识别，用户填好后选择文件导入即可自动推断列映射。
     void import('xlsx').then((X) => {
       const aoa = [
-        ['日期', '类型', '金额', '账户', '转入账户', '分类', '备注'],
-        ['2026-09-01', '支出', '35.5', '微信', '', '餐饮', '午饭'],
-        ['2026-09-02', '收入', '8000', '银行卡', '', '工资', '9月工资'],
-        ['2026-09-03', '转账', '500', '银行卡', '微信', '', '转零钱'],
-        ['2026-09-04', '支出', '99', '支付宝', '', '购物', '日用品'],
+        ['日期', '类型', '金额', '账户', '转入账户', '分类', '备注', '支付时间', '付款方式', '收款方', '订单号', '商家订单号'],
+        ['2026-09-01', '支出', '35.5', '微信', '', '餐饮', '午饭', '2026-09-01 12:30:00', '微信支付', '某快餐店', 'D20260901001', 'M20260901001'],
+        ['2026-09-02', '收入', '8000', '银行卡', '', '工资', '9月工资', '2026-09-02 09:00:00', '银行卡', '某公司', '', ''],
+        ['2026-09-03', '转账', '500', '银行卡', '微信', '', '转零钱', '2026-09-03 10:00:00', '', '', '', ''],
+        ['2026-09-04', '负债减少', '99', '信用卡', '', '还款', '信用卡还款', '2026-09-04 15:20:00', '银行卡', '招商银行', '', ''],
       ];
       const ws = X.utils.aoa_to_sheet(aoa);
-      ws['!cols'] = [{ wch: 12 }, { wch: 8 }, { wch: 8 }, { wch: 10 }, { wch: 10 }, { wch: 8 }, { wch: 16 }];
+      ws['!cols'] = [{ wch: 12 }, { wch: 10 }, { wch: 8 }, { wch: 10 }, { wch: 10 }, { wch: 8 }, { wch: 14 }, { wch: 20 }, { wch: 10 }, { wch: 12 }, { wch: 16 }, { wch: 16 }];
       const wb = X.utils.book_new();
       X.utils.book_append_sheet(wb, ws, '导入模板');
       X.writeFile(wb, 'moneybook-导入模板.xlsx');
@@ -347,7 +379,13 @@ export default function ImportManage() {
         const patch: Partial<ImportRow> = {};
         if (!r.category && res.categories.length) { patch.category = res.categories[0].name; filledCat++; }
         if (!r.account && res.account) { patch.account = res.account.name; filledAcc++; }
-        if (Object.keys(patch).length) patchRow(rowKeyOf(r), patch);
+        if (Object.keys(patch).length) {
+          patchRow(rowKeyOf(r), patch);
+          // AI 填充不算用户修正：同步更新解析基线，避免把 AI 推荐误当作用户改动学成规则
+          const key = rowKeyOf(r);
+          const prev = origRowsRef.current.get(key);
+          if (prev) origRowsRef.current.set(key, { ...prev, ...patch });
+        }
       }
       toast.success(`已按推荐补全 ${filledCat} 个分类、${filledAcc} 个账户${(filledCat + filledAcc) === 0 ? '（所有匹配需手动处理）' : ''}`);
     } catch (e) {
@@ -376,6 +414,37 @@ export default function ImportManage() {
     } finally {
       setRecalcBusy(false);
     }
+  }
+
+  /**
+   * 把若干「用户修正」自动沉淀为资金流向规则（幂等合并、纯本地、可编辑/停用），并写审计。
+   * 读最新规则集（而非组件内存态，避免覆盖其他入口的改动），合并后回写并刷新 UI。
+   * @returns 本次实际学习/更新的关键词列表（为空表示无需学习）
+   */
+  async function applyLearnedRules(candidates: LearnedRuleCandidate[]): Promise<string[]> {
+    if (!candidates.length) return [];
+    let next = loadImportRules();
+    const learned: LearnedRuleCandidate[] = [];
+    for (const c of candidates) {
+      const r = learnRuleFromCorrection(next, c);
+      if (r.changed) { next = r.rules; learned.push(c); }
+    }
+    if (!learned.length) return [];
+    saveImportRules(next);
+    setRules(next);
+    console.log('[导入规则学习] 沉淀规则：', learned.map((c) => `${c.match} → ${c.type}${c.account ? '/' + c.account : ''}${c.toAccount ? '→' + c.toAccount : ''}${c.category ? '(' + c.category + ')' : ''}`).join('；'));
+    // 审计联动：记录学习动作，供「用户纠正→回写规则」闭环可观测
+    for (const c of learned) {
+      void recordAudit({
+        kind: 'rule_learned',
+        source: 'rule',
+        action: '自动学习导入规则',
+        after: JSON.stringify(c),
+        basis: '用户在导入中手动修正归类后自动沉淀为资金流向规则（可编辑/停用）',
+        method: 'import-learn',
+      });
+    }
+    return learned.map((c) => c.match);
   }
 
   async function doImport() {
@@ -428,6 +497,31 @@ export default function ImportManage() {
         const hist = await listImportLogs();
         setImportHist(hist);
       } catch { /* 写入审计失败可忽略 */ }
+      // —— 导入规则自动学习 ——
+      // 用户修正了类型/账户/分类的行导入成功后，自动沉淀为资金流向规则（幂等合并、纯本地、可编辑/停用）。
+      // 仅学习真正落库的行；「整批归入账户」的批量覆盖不算逐商户修正，不学账户。
+      try {
+        const importedKeys = new Set(res.importedRows.map((ir) => ir.rowKey));
+        const candidates: LearnedRuleCandidate[] = [];
+        const bulkAssign = assignAccount !== '0';
+        for (const r of finalRows) {
+          if (!importedKeys.has(rowKeyOf(r))) continue;
+          const orig = origRowsRef.current.get(rowKeyOf(r));
+          if (!orig) continue;
+          if (!shouldLearnCorrection(orig, r, { ignoreAccount: bulkAssign })) continue;
+          const match = pickRuleKeyword(r);
+          if (!match) continue;
+          const c: LearnedRuleCandidate = { match, type: r.type };
+          if (!bulkAssign && r.account && r.account !== orig.account) c.account = r.account;
+          if (r.toAccount && r.toAccount !== orig.toAccount) c.toAccount = r.toAccount;
+          if (r.category && r.category !== orig.category) c.category = r.category;
+          candidates.push(c);
+        }
+        const learned = await applyLearnedRules(candidates);
+        if (learned.length) {
+          toast.success(`已自动学习 ${learned.length} 条资金流向规则：${learned.join('、')}（可在「资金流向判定规则」中查看/停用）`, { duration: 6000 });
+        }
+      } catch { /* 学习失败不影响导入结果 */ }
       // 保留仍未恢复的「被跳过行」（等用户手动恢复），其余已入库行清空
       setRows((prev) => prev.filter((r) => r._skippedReason));
       setDupLines(new Set());
@@ -469,6 +563,27 @@ export default function ImportManage() {
       });
       setRecon((prev) => prev.filter((x) => x.id !== item.id));
       toast.success(`第${item.line}行已修正`);
+      // —— 导入规则自动学习 ——
+      // 用户就地修正可疑行的类型/账户后，自动沉淀为资金流向规则（幂等合并、纯本地、可编辑/停用）。
+      // 分类/备注在待核对中不可编辑，不参与学习；仅把与解析原值不同的字段写入规则。
+      try {
+        const match = pickRuleKeyword(item.src);
+        const cur: ImportRow = {
+          ...item.src,
+          type: item.type,
+          account: refs?.accounts.find((a) => a.id === item.accountId)?.name ?? item.src.account,
+          toAccount: item.type === 'transfer'
+            ? (refs?.accounts.find((a) => a.id === item.toAccountId)?.name ?? item.src.toAccount)
+            : undefined,
+        };
+        if (match && shouldLearnCorrection(item.src, cur)) {
+          const c: LearnedRuleCandidate = { match, type: item.type };
+          if (cur.account && cur.account !== item.src.account) c.account = cur.account;
+          if (item.type === 'transfer' && cur.toAccount && cur.toAccount !== item.src.toAccount) c.toAccount = cur.toAccount;
+          const learned = await applyLearnedRules([c]);
+          if (learned.length) toast.info(`已学习规则「${match}」：同类导入将自动按此归类（可编辑/停用）`, { duration: 6000 });
+        }
+      } catch { /* 学习失败不影响修正结果 */ }
     } catch (e) {
       toast.error(`修正失败：${(e as Error).message}`);
     }
@@ -502,7 +617,7 @@ export default function ImportManage() {
       <div className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-4">
         <h3 className="mb-1 flex items-center gap-1.5 font-semibold">
           Excel / CSV 批量导入
-          <Hint text="支持 .xlsx / .xls / .csv 及支付宝、微信加密账单（zip 可输入解压密码，本机解密不上传）。可一次选择多个文件；下载模板填写后导入。「类型」填 收入 / 支出 / 转账，「账户」按名称匹配当前账本，缺失的账户与分类可自动创建。" />
+          <Hint text="支持 .xlsx / .xls / .csv 及支付宝、微信加密账单（zip 可输入解压密码，本机解密不上传）。可一次选择多个文件；下载模板填写后导入。「类型」填 收入 / 支出 / 转账 / 负债减少，「账户」按名称匹配当前账本，缺失的账户与分类可自动创建。" />
         </h3>
         {/* 余额中性是用户易踩坑的关键点，保留为一行醒目提示（不折叠） */}
         <p className="mb-3 text-xs text-[var(--color-warning,#F59E0B)]">
@@ -563,6 +678,7 @@ export default function ImportManage() {
             <div className="mt-2 space-y-2">
               <div className="text-xs text-muted">
                 命中关键词（包含匹配）时按此规则判定资金流向，优先级高于内置识别（还款/退款/提现/收支方向）；可把某商家或某说明文本固定归到某类型、某账户或某分类。
+                在预览里修正行的类型/账户/分类并导入，或在「导入后待核对」保存修正后，会自动沉淀为规则（幂等合并；已停用的规则不会被自动覆盖）。
               </div>
               {rules.length === 0 && <div className="text-xs text-muted">暂无规则，点「添加规则」新建。</div>}
               {rules.map((r, i) => (

@@ -273,8 +273,12 @@ export async function execute(sql: string, params: unknown[] = []): Promise<Exec
  * sqlx 在连接归还时会回滚未结束的事务 —— 那会导致「写成功却 COMMIT 失败」的假报错
  * （详见 tx.rs 顶部说明）。故必须由 Rust 侧持有连接。
  *
- * 降级保护：若 tx_begin 不可用（浏览器预览、命令未注册、拿不到写锁等），
- * 自动退回「顺序执行 + 自动提交」，保证功能不因事务不可用而整体失效。
+ * 降级策略（两层）：
+ *  - 浏览器预览（isBrowserPreview）：无真实数据库，事务本不可用，直接顺序执行 + 自动提交，
+ *    保证预览功能不失效——这是预期行为；
+ *  - 生产 Tauri：tx_begin 失败（命令未注册、数据库打开失败、拿锁超时等）时【拒绝降级】，
+ *    抛出明确错误中止写操作。原因是事务是数据一致性的底线——静默降级为顺序执行会让
+ *    「INSERT 成功但余额未更新」这类半程数据落库且难以追溯，比报错更危险。
  */
 export async function runInTransaction<T>(fn: () => Promise<T>): Promise<T> {
   if (isBrowserPreview()) return fn();
@@ -287,8 +291,14 @@ export async function runInTransaction<T>(fn: () => Promise<T>): Promise<T> {
     await txInvoke('tx_begin');
     began = true;
   } catch (e) {
-    // eslint-disable-next-line no-console
-    console.warn('[db] 无法开启原子事务，已降级为顺序执行：', e);
+    if (isBrowserPreview()) {
+      // eslint-disable-next-line no-console
+      console.warn('[db] 浏览器预览：事务降级为顺序执行（仅预览可用，无真实原子性）');
+    } else {
+      // 生产环境绝不静默降级：宁可中止写操作，也不让半程数据落库
+      const reason = e instanceof Error ? e.message : String(e);
+      throw new Error(`无法开启原子事务，写操作已中止（${reason}）。请重启应用后重试；若持续出现，请检查安装完整性。`);
+    }
   }
 
   txDepth++;

@@ -47,6 +47,10 @@ export async function createAccount(p: {
  *   `initial_balance = 目标余额 − Σ流水`
  * 这样既让用户所见即所得地改到金额，又保持与「重算账户余额」同一口径——
  * 后续重算不会把用户刚才的设置覆盖掉（因为 initial + Σ流水 恰好等于目标余额）。
+ *
+ * 投资账户例外：其余额（现金）语义含「−Σ持仓成本」这一无流水项（持仓买卖直接调整现金、无流水），
+ * 因此反推初始余额时须一并补回：`initial = 目标余额 − Σ流水 + Σ持仓成本`，
+ * 与 recalcAccountBalances 的投资账户口径完全一致，保证重算幂等。
  */
 export async function updateAccount(id: number, p: Partial<Account>): Promise<void> {
   const set: string[] = [];
@@ -55,8 +59,17 @@ export async function updateAccount(id: number, p: Partial<Account>): Promise<vo
   if (p.balance !== undefined) {
     const target = Number(p.balance) || 0;
     const flow = await getAccountNetFlow(id);
+    // 按库中账户类型决定反推口径：投资账户需补回「−Σ持仓成本」
+    const [accRow] = await select<{ type: string }>(`SELECT type FROM accounts WHERE id = $1`, [id]);
+    let costValue = 0;
+    if (accRow?.type === 'investment') {
+      const [cvRow] = await select<{ cv: number | null }>(
+        `SELECT COALESCE(SUM(quantity*cost),0) AS cv FROM account_holdings WHERE account_id = $1`, [id]
+      );
+      costValue = Number(cvRow?.cv ?? 0);
+    }
     set.push(`balance = $${params.length + 1}`); params.push(target);
-    set.push(`initial_balance = $${params.length + 1}`); params.push(target - flow);
+    set.push(`initial_balance = $${params.length + 1}`); params.push(target - flow + costValue);
   }
   if (p.name !== undefined) { set.push(`name = $${params.length + 1}`); params.push(p.name); }
   if (p.type !== undefined) { set.push(`type = $${params.length + 1}`); params.push(p.type); }
@@ -107,9 +120,11 @@ export async function zeroAccountBalance(id: number): Promise<number> {
 
 /** 删除账户。
  *  前置校验：
- *   - 若账户被交易、借贷或储蓄目标引用，拒绝删除（防止产生孤儿数据）；
+ *   - 若账户被交易、借贷、储蓄目标或持仓引用，拒绝删除（防止产生孤儿数据、资产凭空消失）；
  *   - 若账户余额不为 0，拒绝删除（否则这笔钱会凭空从净资产消失）——
  *     用户可先编辑账户把余额改为 0，或改用「停用账户」，也可走「清零并删除」。
+ *     （注意：把余额改成 0 是用户显式声明清空该账户，属合法操作且会反推初始余额保证重算幂等；
+ *     持仓检查独立于余额——现金为 0 但有持仓的投资账户同样禁止删除。）
  *  删除前把账户快照写入回收站，支持恢复。
  */
 export async function deleteAccount(id: number): Promise<void> {
@@ -141,6 +156,14 @@ export async function deleteAccount(id: number): Promise<void> {
     );
     if (goal.n > 0) {
       throw new Error('该账户关联储蓄目标，无法删除。');
+    }
+    // 持仓引用检查：投资账户若有未清仓的持仓，其余额（现金）为 0 并不代表无资产——
+    // 持仓市值会直接从净资产里凭空消失，必须先清仓才能删除。
+    const [holding] = await select<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM account_holdings WHERE account_id = $1`, [id]
+    );
+    if (holding.n > 0) {
+      throw new Error('该账户存在未清仓的持仓，无法删除。请先在「投资」页清仓该账户的持仓，再删除账户。');
     }
     const [acc] = await select<Record<string, unknown>>(`SELECT * FROM accounts WHERE id = $1`, [id]);
     if (acc) await recordToTrash('account', id, acc);

@@ -14,6 +14,7 @@ import { useTransactionList } from '@/hooks/useTransactions';
 import { useReconciliation, useReconItems, useReconDiff, exportReconDiff, parseBankStatement, importBankRows, type ReconDiffRow } from '@/hooks/useReconciliation';
 import { listMatches } from '@/api/reconciliation';
 import type { BankRow } from '@/api/reconciliation';
+import { explainReconDiff } from '@/api/llm';
 import { formatDate, formatMoney } from '@/lib/format';
 import type { TransactionDetail } from '@/api/transactions';
 
@@ -217,6 +218,10 @@ function MatchView({ batch, onBack, onLocked }: { batch: ReconRow; onBack: () =>
   const { data: diff } = useReconDiff(batch.id, { page: diffPage, pageSize: diffPageSize });
   const [endBalance, setEndBalance] = useState('');
   const [manualItemId, setManualItemId] = useState<number | null>(null); // 待配对流水
+  // AI 对账差异解释：点击按钮异步请求（可重复点击刷新；AI 失败时回退本地兜底文案）
+  const [aiDiffText, setAiDiffText] = useState('');
+  const [aiDiffSource, setAiDiffSource] = useState<'ai' | 'local' | ''>('');
+  const [aiDiffLoading, setAiDiffLoading] = useState(false);
   const { data: locals = [] } = useTransactionList({
     accountId: batch.account_id,
     from: batch.period_start ?? undefined,
@@ -262,6 +267,23 @@ function MatchView({ batch, onBack, onLocked }: { batch: ReconRow; onBack: () =>
       toast.success(`已导出 ${rows.length} 条差异`);
     } catch (err) {
       toast.error(`导出失败：${(err as Error).message}`);
+    }
+  }
+
+  // AI 对账差异解释：未启用 AI 时由 explainReconDiff 返回本地兜底文案，功能始终可用
+  async function onAiExplain() {
+    if (aiDiffLoading) return;
+    setAiDiffLoading(true);
+    setAiDiffText('');
+    setAiDiffSource('');
+    try {
+      const r = await explainReconDiff(batch.id);
+      setAiDiffText(r.text);
+      setAiDiffSource(r.source);
+    } catch (err) {
+      toast.error(`差异解释失败：${(err as Error).message}`);
+    } finally {
+      setAiDiffLoading(false);
     }
   }
 
@@ -332,8 +354,23 @@ function MatchView({ batch, onBack, onLocked }: { batch: ReconRow; onBack: () =>
           </Button>
           <Button size="sm" variant="outline" onClick={() => onExport('xlsx')}>导出差异（Excel）</Button>
           <Button size="sm" variant="outline" onClick={() => onExport('csv')}>导出差异（CSV）</Button>
+          <Button size="sm" variant="outline" onClick={onAiExplain} disabled={aiDiffLoading} title="让 AI 结合差异明细说明差在哪，并给出排查建议">
+            {aiDiffLoading ? 'AI 分析中…' : '🤖 AI 解释差异'}
+          </Button>
           <span className="text-xs text-muted">模板列：日期 / 摘要 / 收入 / 支出 / 余额</span>
         </div>
+        {/* AI 差异解释结果（AI 未开启或失败时展示本地兜底文案，功能不中断） */}
+        {aiDiffText && (
+          <div className="mt-3 whitespace-pre-wrap rounded-lg border border-[var(--border)] bg-black/2 p-3 text-sm dark:bg-white/5">
+            <div className="mb-1.5 flex items-center justify-between">
+              <span className="font-medium">对账差异解释</span>
+              <span className="text-[10px]" style={{ color: '#8b8b96' }}>
+                {aiDiffLoading ? '分析中…' : aiDiffSource === 'ai' ? 'AI' : '本地'}
+              </span>
+            </div>
+            {aiDiffText}
+          </div>
+        )}
       </div>
 
       {/* 步骤二：匹配结果与差异 */}

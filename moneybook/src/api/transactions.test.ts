@@ -243,18 +243,18 @@ describe('recalcAccountBalances：按流水重算真实账户余额', () => {
     );
   });
 
-  it('重算范围排除投资与应收/应付虚拟账户，只覆盖真实账户类型', async () => {
+  it('重算范围覆盖真实账户与投资账户，排除应收/应付虚拟账户', async () => {
     let capturedParams: unknown[] = [];
     vi.mocked(select).mockImplementation(async (sql: string, params: unknown[] = []): Promise<any[]> => {
       if (String(sql).includes('initial_balance FROM accounts')) { capturedParams = params; return []; }
       return [];
     });
     await recalcAccountBalances();
-    // 第一个参数是账本 id，其后为参与重算的账户类型白名单
+    // 第一个参数是账本 id，其后为参与重算的账户类型（真实账户 + 投资账户，投资走特殊公式）
     const types = capturedParams.slice(1);
-    expect(types).toEqual(['cash', 'bank', 'ewallet', 'credit', 'savings']);
-    // 排除项绝不在白名单中：投资账户现金受持仓买卖直接调整、虚拟账户由借贷重算
-    for (const t of ['investment', 'receivable', 'payable']) {
+    expect(types).toEqual(['cash', 'bank', 'ewallet', 'credit', 'savings', 'investment']);
+    // 虚拟账户绝不在重算范围中：余额由 syncVirtualAccounts 按借贷剩余本金维护
+    for (const t of ['receivable', 'payable']) {
       expect(types).not.toContain(t);
     }
   });

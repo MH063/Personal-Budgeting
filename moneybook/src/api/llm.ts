@@ -8,6 +8,8 @@ import { maskSensitive, sanitizeRow } from '@/lib/sanitize';
 import { analyzeLocally, type LocalDiagnosis, type AnalysisDimension } from './analysis';
 import type { FlowAnalysis, FlowDimension } from './moneyflow';
 import { useKnowledgeStore } from '@/stores/useKnowledgeStore';
+import { reconDiffSummary, type BankRow, type ReconItem } from './reconciliation';
+import { currentLedgerId } from '@/lib/ledger';
 
 /**
  * 隐私与安全说明（调用方必须遵守）：
@@ -454,3 +456,114 @@ export const FORECAST_SYSTEM =
   '2. 预计现金流入与结余，判断是否会入不敷出；\n' +
   '3. 现金流/超支风险预警：指出最可能超预算或产生突发压力的分类与应对预案。\n' +
   '只依据给定数据合理推断，明确标注不确定性，不编造；简洁、可执行，简体中文。';
+
+// =====================================================================
+// AI 对账差异解释：当对账存在差异（未配对 / 金额不符 / 余额差额非零）时，
+// 把「差异构成」组装成脱敏上下文交给 AI 说明「差在哪」（漏记/重复/金额不符等），
+// 并给出排查建议。隐私边界：摘要/备注/账户名统一经 maskSensitive 脱敏后才上送，
+// 仅发送汇总与少量示例，绝不发送完整交易列表。
+// =====================================================================
+
+/** AI 对账差异解释的系统提示：只依据给定差异事实归因，不编造。 */
+export const RECON_DIFF_SYSTEM =
+  '你是银行对账差异分析助手。以下是某账户一次对账产生的差异汇总（摘要/备注均经脱敏，不含个人可识别信息）。请：\n' +
+  '1. 用通俗语言说明「钱对不上」的可能原因（漏记、重复记账、金额不符、日期偏差、跨期、手续费/汇率、拆分未配对等），逐条说明依据；\n' +
+  '2. 指出最可能的 1-2 个原因并解释为什么；\n' +
+  '3. 给出可执行的排查/处理建议（如核对某笔、补录、调整分类或金额）。\n' +
+  '只依据给定数据推理，不编造具体交易或数字；回答简洁、条理清晰，使用简体中文。';
+
+/** 把某条银行流水行从 bank_row JSON 中安全解析（坏行返回 null）。 */
+function parseBankRowSafe(item: Pick<ReconItem, 'bank_row'>): BankRow | null {
+  try { return JSON.parse(item.bank_row) as BankRow; } catch { return null; }
+}
+
+/**
+ * 组装「对账差异」的脱敏上下文（纯数据收集，不调用 LLM）。
+ * 三类差异均只取前若干条作为示例（防 token 过大）；摘要/备注/账户名统一经 maskSensitive 脱敏。
+ */
+export async function buildReconDiffContext(recId: number): Promise<string> {
+  const [rec] = await select<{
+    account_name: string | null; period_start: string | null; period_end: string | null;
+    opening_balance: number; bank_balance: number | null; calc_balance: number | null; diff_total: number;
+  }>(
+    `SELECT a.name AS account_name, r.period_start, r.period_end,
+            r.opening_balance, r.bank_balance, r.calc_balance, r.diff_total
+     FROM reconciliations r LEFT JOIN accounts a ON r.account_id = a.id
+     WHERE r.id = $1 AND r.ledger_id = $2`,
+    [recId, currentLedgerId()]
+  );
+  if (!rec) return '';
+  const diff = await reconDiffSummary(recId);
+
+  const money = (v: number) => `¥${v.toFixed(2)}`;
+  const fmtBank = (m: ReconItem) => {
+    const b = parseBankRowSafe(m);
+    if (!b) return '（解析失败的流水行）';
+    const amt = b.income > 0 ? `+${money(b.income)}` : `-${money(b.expense)}`;
+    return `${maskSensitive(b.summary || '（无摘要）')} ${amt}（${b.date}）`;
+  };
+
+  let s = `【银行对账·差异说明】账户 ${maskSensitive(rec.account_name ?? '')}，期间 ${rec.period_start ?? '-'} ~ ${rec.period_end ?? '-'}\n`;
+  s += `期初 ${money(rec.opening_balance)}，推算余额 ${rec.calc_balance != null ? money(rec.calc_balance) : '未计算'}，银行余额 ${rec.bank_balance != null ? money(rec.bank_balance) : '未填写'}，差额 ${money(rec.diff_total)}。\n`;
+
+  s += `\n银行有·本地无：共 ${diff.bankUnmatched.length} 条` +
+    (diff.bankUnmatched.length ? `，示例：${diff.bankUnmatched.slice(0, 10).map(fmtBank).join('；')}` : '') + '\n';
+  s += `本地有·银行无：共 ${diff.localUnmatchedTotal} 条` +
+    (diff.localUnmatched.length ? `，示例：${diff.localUnmatched.slice(0, 10).map((t) => `${maskSensitive(t.tx_note ?? '（无备注）')} ${money(Math.abs(t.tx_amount ?? 0))}（${t.tx_date ?? '-'}）`).join('；')}` : '') + '\n';
+  s += `金额不符：共 ${diff.amountMismatch.length} 条` +
+    (diff.amountMismatch.length ? `，示例：${diff.amountMismatch.slice(0, 10).map(fmtBank).join('；')}` : '') + '\n';
+
+  s += '\n（以上摘要/备注已脱敏，仅含汇总与示例；请据此说明差异可能原因与处理建议，不要编造未提供的交易。）';
+  return s;
+}
+
+/** 生成确定性的本地兜底文案（不依赖 LLM）：列出差异构成 + 通用排查建议。 */
+export function buildReconDiffLocalText(args: {
+  bankUnmatchedN: number;
+  localUnmatchedN: number;
+  amountMismatchN: number;
+}): string {
+  const parts: string[] = [];
+  if (args.bankUnmatchedN > 0) parts.push(`银行有·本地无 ${args.bankUnmatchedN} 条（可能漏记本地交易）`);
+  if (args.localUnmatchedN > 0) parts.push(`本地有·银行无 ${args.localUnmatchedN} 条（可能本地多记或银行未入账）`);
+  if (args.amountMismatchN > 0) parts.push(`金额不符 ${args.amountMismatchN} 条（可能金额录入有误或手续费/汇率差异）`);
+  const head = parts.length ? `本次对账差异构成：${parts.join('、')}。` : '本次对账没有未配对或金额不符的差异。';
+  return (
+    head + '\n建议排查：\n' +
+    '1. 先核对「银行有·本地无」的流水是否漏记，必要时补录本地交易；\n' +
+    '2. 再核对「本地有·银行无」是否重复记账或银行未入账，确认后删除或调整；\n' +
+    '3. 「金额不符」请逐笔比对原交易金额，注意手续费/汇率/四舍五入等差异；\n' +
+    '4. 仍有差异时，可核对期间外的前后交易是否跨期。\n' +
+    '（提示：开启 AI 并配置凭证后，可让 AI 结合差异明细给出更具体的归因与建议。）'
+  );
+}
+
+/**
+ * AI 对账差异解释入口：先本地统计给出确定性文案；已启用 AI 时把脱敏差异上下文交给 LLM
+ * 生成更自然的归因与建议，任一步失败都回退本地文案（功能不中断）。
+ */
+export async function explainReconDiff(recId: number): Promise<{ text: string; source: 'ai' | 'local' }> {
+  const diff = await reconDiffSummary(recId);
+  const local = buildReconDiffLocalText({
+    bankUnmatchedN: diff.bankUnmatched.length,
+    localUnmatchedN: diff.localUnmatchedTotal,
+    amountMismatchN: diff.amountMismatch.length,
+  });
+
+  const cfg = readAIConfig();
+  if (cfg.enabled) {
+    try {
+      const ctx = await buildReconDiffContext(recId);
+      if (ctx) {
+        const reply = await chat([
+          { role: 'system', content: RECON_DIFF_SYSTEM },
+          { role: 'user', content: ctx },
+        ]);
+        if (reply && reply.trim()) return { text: reply.trim(), source: 'ai' };
+      }
+    } catch {
+      // AI 失败 → 回退本地文案，功能不中断
+    }
+  }
+  return { text: local, source: 'local' };
+}

@@ -14,10 +14,15 @@ const bundle: ExportBundle = {
       { id: 2, note: '普通午餐', payee: '星巴克', pay_method: '支付宝', order_no: '', merchant_order_no: '' },
     ],
     accounts: [{ id: 1, name: '微信' }],
+    settings: [
+      { key: 'kv.ai', value: '{"providers":[{"apiKeyEnc":"ENCRYPTED"}]}' },
+      { key: 'kv.importRules', value: '[{"match":"外卖"}]' },
+    ],
+    ai_audit_log: [{ id: 1, action: '智能归类：联系 13812345678' }],
   },
 };
 
-describe('maskExportBundle：导出脱敏', () => {
+describe('maskExportBundle：导出脱敏与敏感表过滤', () => {
   it('默认对交易文本列脱敏：手机/卡号打码，订单号语境不误伤', () => {
     const masked = maskExportBundle(bundle);
     const rows = masked.data.transactions as Record<string, unknown>[];
@@ -28,10 +33,24 @@ describe('maskExportBundle：导出脱敏', () => {
     expect(rows[0].order_no).toContain('20260928123457');
   });
 
-  it('inclSensitive=true 时保留原文', () => {
+  it('默认导出剔除含 API Key 的配置项（kv.ai），保留非敏感 settings', () => {
+    const masked = maskExportBundle(bundle);
+    const settings = masked.data.settings as Record<string, unknown>[];
+    expect(settings.some((r) => String(r.key) === 'kv.ai')).toBe(false);
+    expect(settings.some((r) => String(r.key) === 'kv.importRules')).toBe(true);
+  });
+
+  it('默认导出整表剔除 ai_audit_log（AI 操作日志含请求文本）', () => {
+    const masked = maskExportBundle(bundle);
+    expect(masked.data.ai_audit_log).toEqual([]);
+  });
+
+  it('inclSensitive=true 时保留原文（含密钥配置与 AI 日志）', () => {
     const out = maskExportBundle(bundle, true);
     const rows = out.data.transactions as Record<string, unknown>[];
     expect(rows[0].note).toContain('13812345678');
+    expect((out.data.settings as Record<string, unknown>[]).some((r) => String(r.key) === 'kv.ai')).toBe(true);
+    expect(out.data.ai_audit_log).toHaveLength(1);
     expect(out).toBe(bundle); // 直接返回原引用
   });
 });

@@ -676,7 +676,7 @@ export function parseBillAOA(aoa: unknown[][], rules: ImportRule[] = []): { rows
     }
 
     if (!(common.amount > 0)) {
-      const reason = '金额无效';
+      const reason = '金额为 0 或无效';
       skipped.push(`第${lineNo}行：${reason}，已跳过`);
       skippedRows.push({ ...common, type: 'expense', _skippedReason: reason });
       continue;
@@ -716,7 +716,7 @@ export const IMPORT_FIELD_ALIASES: Record<ImportFieldKey, string[]> = {
   payTime: ['支付时间', '付款时间', 'pay_time'],
   type: ['类型', '收支', '收/支', '收入/支出', '收支类型', '借贷标志', '方向', '类别', 'type'],
   amount: ['金额', '交易金额', '金额(元)', '收入金额', '支出金额', 'amount'],
-  account: ['账户', '账户名称', '付款账户', '扣款账户', '收入账户', '支付方式', '付款方式', 'account'],
+  account: ['账户', '账户名称', '付款账户', '扣款账户', '收入账户', 'account'],
   toAccount: ['转入账户', '转至账户', '目标账户', '收账账户', '入账账户', 'to_account', '到账账户'],
   payee: ['收款方', '收款方全称', '交易对方', '商户名称', '商家名称', '对方户名', '对方账户', 'payee'],
   orderNo: ['订单号', '交易单号', '交易订单号', '流水号', 'order_no'],
@@ -760,6 +760,8 @@ export function parseTxType(raw: string): ImportTxType | null {
   if (/收入|收款|入账|存入|到账|income|\+/i.test(t)) return 'income';
   if (/支出|付款|消费|转出|汇款|expense|purchase/i.test(t)) return 'expense';
   if (/转账|转帐|转入|转出中转|transfer/i.test(t)) return 'transfer';
+  // 负债减少（还款/退款回信用账户）：与导入类型下拉的「负债减少」选项对齐，模板中可直接使用
+  if (/负债减少|还款|repay_in/i.test(t)) return 'repay_in';
   return null;
 }
 
@@ -769,11 +771,13 @@ export function parseTxType(raw: string): ImportTxType | null {
  * @param header  表头行内容（用于定位数据起始行：headerIdx 之后为数据行）
  * @param map     业务字段 → 表头列索引；缺省/为负表示不映射该字段
  * @param headerIdx 表头所在行（默认 0）；其后的行视为数据
+ * @param rules   用户自定义资金流向规则（优先级最高，与账单路径 parseBillAOA 口径一致）
  */
 export function parseAoaWithMap(
   aoa: unknown[][],
   map: ColumnMap,
-  headerIdx = 0
+  headerIdx = 0,
+  rules: ImportRule[] = []
 ): { rows: ImportRow[]; skipped: string[] } {
   const rows: ImportRow[] = [];
   const skipped: string[] = [];
@@ -788,27 +792,47 @@ export function parseAoaWithMap(
     // 金额必填且 >0
     const amtStr = at(row, 'amount').replace(/[,，元¥￥\s]/g, '');
     const amount = parseFloat(amtStr) || 0;
-    if (!(amount > 0)) { skipped.push(`第${line}行：金额无效，已跳过`); continue; }
+    if (!(amount > 0)) { skipped.push(`第${line}行：金额为 0 或无效，已跳过`); continue; }
     const rawType = at(row, 'type');
     const type = parseTxType(rawType);
     if (!type) { skipped.push(`第${line}行：类型「${rawType || '空'}」无法识别，已跳过`); continue; }
     const date = parseBillDate(at(row, 'date'));
     const account = at(row, 'account');
-    if (!account && type !== 'transfer') { skipped.push(`第${line}行：缺少账户，已跳过`); continue; }
+    // —— 用户自定义资金流向规则（优先级最高）——
+    // 与账单路径口径一致：命中关键词即按其判定类型/账户/转入账户/分类，
+    // 可把模板里未显式指明或识别不准的流水固定归到某类型，避免每次导入都要手工纠正。
+    const rowText = [at(row, 'payee'), at(row, 'note'), at(row, 'category'), rawType, account].filter(Boolean).join(' ');
+    const ruleHit = matchImportRule(rowText, rules);
+    let typeF: ImportTxType = type;
+    let accountF = account;
+    let toAccountF = at(row, 'toAccount') || undefined;
+    let categoryF = at(row, 'category') || undefined;
+    let basis: string | undefined;
+    if (ruleHit) {
+      typeF = ruleHit.type;
+      accountF = ruleHit.account ? (normalizeAccountName(ruleHit.account) || ruleHit.account) : accountF;
+      toAccountF = ruleHit.type === 'transfer'
+        ? (ruleHit.toAccount ? (normalizeAccountName(ruleHit.toAccount) || ruleHit.toAccount) : toAccountF)
+        : undefined;
+      categoryF = ruleHit.category || categoryF;
+      basis = `命中自定义规则「${ruleHit.match}」→ ${IMPORT_TYPE_LABEL[ruleHit.type] ?? ruleHit.type}`;
+    }
+    if (!accountF && typeF !== 'transfer') { skipped.push(`第${line}行：缺少账户，已跳过`); continue; }
     rows.push({
       line,
-      type,
+      type: typeF,
       amount,
       date,
-      account,
-      toAccount: at(row, 'toAccount') || undefined,
-      category: at(row, 'category') || undefined,
+      account: accountF,
+      toAccount: toAccountF,
+      category: categoryF,
       note: at(row, 'note') || undefined,
       payTime: at(row, 'payTime') || undefined,
       payMethod: at(row, 'payMethod') || undefined,
       payee: at(row, 'payee') || undefined,
       orderNo: at(row, 'orderNo') || undefined,
       merchantOrderNo: at(row, 'merchantOrderNo') || undefined,
+      ...(basis ? { basis } : {}),
     });
   }
   return { rows, skipped };

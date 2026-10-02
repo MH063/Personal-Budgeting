@@ -399,12 +399,45 @@ describe('列映射预览：buildColumnMap / parseTxType / parseAoaWithMap', () 
     expect(map.note).toBe(4);
   });
 
-  it('parseTxType 识别收支与转账，中性返回 null', () => {
+  it('parseTxType 识别收支、转账与负债减少，中性返回 null', () => {
     expect(parseTxType('收入')).toBe('income');
     expect(parseTxType('支出')).toBe('expense');
     expect(parseTxType('转账')).toBe('transfer');
+    expect(parseTxType('负债减少')).toBe('repay_in');
+    expect(parseTxType('还款')).toBe('repay_in');
     expect(parseTxType('不计收支')).toBeNull();
     expect(parseTxType('中性')).toBeNull();
+  });
+
+  it('下载模板（12 列）自动映射：付款方式归 payMethod 而非 account，且含负债减少行可解析', () => {
+    // 与 ImportManage.downloadTemplate 的模板列保持一致
+    const header = ['日期', '类型', '金额', '账户', '转入账户', '分类', '备注', '支付时间', '付款方式', '收款方', '订单号', '商家订单号'];
+    const map = buildColumnMap(header);
+    expect(map.date).toBe(0);
+    expect(map.type).toBe(1);
+    expect(map.amount).toBe(2);
+    expect(map.account).toBe(3);
+    expect(map.toAccount).toBe(4);
+    expect(map.category).toBe(5);
+    expect(map.note).toBe(6);
+    expect(map.payTime).toBe(7);
+    // 「付款方式」必须归 payMethod（此前会被 account 的歧义别名抢先认领）
+    expect(map.payMethod).toBe(8);
+    expect(map.payee).toBe(9);
+    expect(map.orderNo).toBe(10);
+    expect(map.merchantOrderNo).toBe(11);
+    const aoa: unknown[][] = [
+      header,
+      ['2026-09-04', '负债减少', '99', '信用卡', '', '还款', '信用卡还款', '2026-09-04 15:20:00', '银行卡', '招商银行', '', ''],
+      ['2026-09-05', '支出', '0', '微信', '', '', '', '', '', '', '', ''],
+    ];
+    const res = parseAoaWithMap(aoa, map);
+    expect(res.rows).toHaveLength(1);
+    expect(res.rows[0]).toMatchObject({
+      type: 'repay_in', amount: 99, account: '信用卡', category: '还款',
+      payTime: '2026-09-04 15:20:00', payMethod: '银行卡', payee: '招商银行',
+    });
+    expect(res.skipped.length).toBeGreaterThan(0); // 金额 0 行被跳过
   });
 
   it('parseAoaWithMap 按用户指定列解析（含 5 交易字段），漏金额/类型行被跳过', () => {

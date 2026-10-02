@@ -72,10 +72,19 @@ function textPlausibilityRatio(data: Uint8Array): number | null {
 
 /**
  * 解压结果：成功返回内容；失败返回 null（无法区分具体原因时）。
+ * reason 语义：aes=不支持的 WinZip AES；bad_password=密码错误；unsupported=压缩方法不支持；
+ * corrupt=结构损坏/无法识别；too_large=超过 zip 炸弹防护上限（文件/条目/解压体积）。
  */
 export type ExtractResult =
   | { ok: true; name: string; data: Uint8Array }
-  | { ok: false; reason: 'aes' | 'bad_password' | 'unsupported' | 'corrupt' };
+  | { ok: false; reason: 'aes' | 'bad_password' | 'unsupported' | 'corrupt' | 'too_large' };
+
+// —— zip 炸弹防护上限 ——
+// 真实账单（微信/支付宝导出）zip 通常 ≤ 数十 MB、条目 ≤ 上百。上限仅为兜底防御恶意压缩包：
+// 原始文件 ≤ 64MB、条目数 ≤ 1024、解压后总体积 ≤ 256MB（防高压缩比炸弹耗尽内存）。
+const MAX_ZIP_INPUT_BYTES = 64 * 1024 * 1024;
+const MAX_ZIP_ENTRIES = 1024;
+const MAX_EXTRACT_TOTAL_BYTES = 256 * 1024 * 1024;
 
 /** 兼容旧签名：成功返回内容；失败返回 null。 */
 export function extractFromZipWithPassword(buf: Uint8Array, password: string): { name: string; data: Uint8Array } | null {
@@ -187,13 +196,22 @@ function readCentralDirectory(buf: Uint8Array): CentralEntry[] {
  * 密码错误/损坏返回 { ok:false, reason }。
  */
 export function tryExtractZip(buf: Uint8Array, password: string): ExtractResult {
+  // zip 炸弹防护：原始文件过大 / 条目数超限直接拒绝
+  if (buf.length > MAX_ZIP_INPUT_BYTES) return { ok: false, reason: 'too_large' };
   const entries = readCentralDirectory(buf);
+  if (entries.length > MAX_ZIP_ENTRIES) return { ok: false, reason: 'too_large' };
   const first = entries.find((e) => !e.name.endsWith('/'));
   if (!first) return { ok: false, reason: 'corrupt' };
   // 未加密 zip：交给 fflate 解出全部条目（成熟稳定）
   if (!first.encrypted) {
     try {
       const files = unzipSync(buf, (password ? { password } : undefined) as unknown as UnzipOptions);
+      // 解压后总体积统计：防高压缩比 zip 炸弹
+      let total = 0;
+      for (const n in files) {
+        total += files[n].length;
+        if (total > MAX_EXTRACT_TOTAL_BYTES) return { ok: false, reason: 'too_large' };
+      }
       if (zipIsXlsxStructure(files)) return { ok: true, name: '解压后的账单.xlsx', data: repackXlsxEntries(files) };
       const en = Object.entries(files).find(([n]) => !n.endsWith('/'));
       if (!en) return { ok: false, reason: 'corrupt' };
@@ -237,5 +255,7 @@ export function tryExtractZip(buf: Uint8Array, password: string): ExtractResult 
   } else {
     return { ok: false, reason: 'unsupported' };
   }
+  // 解压后体积上限（store 分支受原始文件上限约束，此处统一兜底）
+  if (payload.length > MAX_EXTRACT_TOTAL_BYTES) return { ok: false, reason: 'too_large' };
   return { ok: true, name: first.name, data: payload };
 }

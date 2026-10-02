@@ -52,6 +52,37 @@ export function validateTxPayload(p: TxPayload): string | null {
   return null;
 }
 
+/**
+ * 订单号唯一性校验（必须在事务内调用，与写库同一事务）。
+ *
+ * 背景：同一订单（orderNo / merchantOrderNo）被重复录入会造成重复记账，对账时同一笔流水对不上、
+ * 也难以追溯，故 create/update 前先按账本查重。两个订单字段各自独立查重
+ * （order_no 对 order_no、merchant_order_no 对 merchant_order_no），避免跨字段互相误伤。
+ *
+ * @param orderNo        订单号（空串/未提供则跳过——并非所有交易都有订单号）
+ * @param merchantOrderNo 商家订单号（同上）
+ * @param excludeId      更新场景传入自身 id，排除“改单但订单号没变”的误判
+ */
+async function assertOrderNoUnique(orderNo?: string, merchantOrderNo?: string, excludeId?: number): Promise<void> {
+  const o = String(orderNo ?? '').trim();
+  const m = String(merchantOrderNo ?? '').trim();
+  if (!o && !m) return;
+  const lid = currentLedgerId();
+  for (const [no, field, label] of [
+    [o, 'order_no', '订单号'],
+    [m, 'merchant_order_no', '商家订单号'],
+  ] as Array<[string, string, string]>) {
+    if (!no) continue;
+    const rows = await select<{ id: number }>(
+      `SELECT id FROM transactions WHERE ledger_id = $1 AND ${field} = $2${excludeId != null ? ' AND id <> $3' : ''}`,
+      excludeId != null ? [lid, no, excludeId] : [lid, no]
+    );
+    if (rows.length > 0) {
+      throw new Error(`「${label}」${no} 已存在，疑似同一订单重复记账，请勿重复录入。`);
+    }
+  }
+}
+
 export interface Transaction {
   id: number;
   type: TxPayload['type'];
@@ -189,6 +220,8 @@ export async function createTransaction(p: TxPayload): Promise<number> {
   const err = validateTxPayload(p);
   if (err) throw new Error(err);
   return runInTransaction(async () => {
+    // 订单号去重（与 INSERT 同一事务，防止并发重复录入）
+    await assertOrderNoUnique(p.orderNo, p.merchantOrderNo);
     const now = new Date().toISOString();
     const result = await execute(
       `INSERT INTO transactions
@@ -241,6 +274,8 @@ export async function updateTransaction(id: number, p: TxPayload): Promise<void>
       throw new Error('贷款生成的交易不能直接编辑，请到「借贷」页管理对应的贷款。');
     }
     await reverseBalance(old);
+    // 订单号去重（排除自身 id：改单但订单号未变不算重复）
+    await assertOrderNoUnique(p.orderNo, p.merchantOrderNo, id);
     await execute(
       `UPDATE transactions SET
         type=$1, amount=$2, category_id=$3, account_id=$4, to_account_id=$5,
@@ -294,11 +329,12 @@ export async function syncVirtualAccounts() {
 }
 
 /**
- * 参与「按流水重算余额」的真实账户类型。
+ * 参与「按流水重算余额」的真实账户类型（白名单）。
  * 排除项及原因：
- *  - `receivable`/`payable`：虚拟账户，余额由 syncVirtualAccounts 按借贷剩余本金重算，与流水无累加关系；
- *  - `investment`：其 balance 是账户内【现金】，买卖持仓时由 adjustCash 直接增减且【不产生流水】，
- *    按流水重算会把持仓买卖造成的现金变动抹掉，故不参与。
+ *  - `receivable`/`payable`：虚拟账户，余额由 syncVirtualAccounts 按借贷剩余本金重算，
+ *    与流水无累加关系（批量导入不产生借贷，天然一致），故不参与；
+ *  - `investment`：不在本白名单内，但同样参与重算（见 recalcAccountBalances 的投资账户特殊分支）——
+ *    因其持仓买卖由 adjustCash 直接增减现金且【不产生流水】，重算需把「−当前持仓成本」这一无流水项补回。
  * 其余类型（现金/银行/电子钱包/信用/储蓄）余额完全由流水累加而来，可安全重算。
  */
 const RECALC_ACCOUNT_TYPES = ['cash', 'bank', 'ewallet', 'credit', 'savings'];
@@ -324,18 +360,23 @@ export async function getAccountNetFlow(accountId: number): Promise<number> {
 }
 
 /**
- * 按流水重算「真实账户」余额（现金 / 银行 / 电子钱包 / 信用 / 储蓄）。
+ * 按流水重算账户余额（现金 / 银行 / 电子钱包 / 信用 / 储蓄 / 投资）。
  *
  * 背景：批量导入是「余额中性」的——只写流水、不调用 applyBalance，因此导入进来的
  * 消费/收入/还款不会反映到账户余额上（信用账户负债始终显示为 0）。此函数把每个真实账户
  * 的余额按其名下全部流水重新算一遍，使账户余额与流水一致。
  *
- * 口径：`balance = initial_balance + Σ流水净影响`
+ * 口径：`balance = initial_balance + Σ流水净影响`（投资账户另有「−Σ持仓成本」一项，见下）。
  * 方向与 applyBalance 严格一致（income/borrow/repay_in 入账 +；expense/lend/repay_out 出账 −；
  * transfer 出账 −、入账 +），故对「已由记账动作维护过余额」的账户重算是幂等的、不改变结果；
  * 只补上那些「导入写进来、尚未影响余额」的流水。保留 initial_balance 是为了不覆盖用户手工设定的起始余额。
  *
- * 注意：投资账户与应收/应付虚拟账户不参与重算（见 RECALC_ACCOUNT_TYPES 注释）。
+ * 投资账户特殊项：持仓买卖由 adjustCash 直接增减现金且【不产生流水】。而持仓现金调整的净影响
+ * 恒等于「−当前持仓成本（Σ qty*cost）」——买入扣成本、清仓按成本返还、改仓按差值调整，守恒可验证——
+ * 故投资账户按 `initial + Σ流水 − Σ持仓成本` 重算，与 adjustCash 的累计结果严格一致且幂等。
+ * 这补齐了「批量导入投资账户流水后余额不更新」的缺口。
+ *
+ * 注意：应收/应付虚拟账户不参与重算（见 RECALC_ACCOUNT_TYPES 注释）。
  *
  * @returns 余额确实发生变化的账户（含改前/改后），供前端提示；无变化返回空数组
  */
@@ -343,17 +384,25 @@ export async function recalcAccountBalances(): Promise<{ id: number; name: strin
   const lid = currentLedgerId();
   const typePh = RECALC_ACCOUNT_TYPES.map((_, i) => `$${i + 2}`).join(', ');
   return runInTransaction(async () => {
-    const accs = await select<{ id: number; name: string; balance: number; initial_balance: number | null }>(
-      `SELECT id, name, balance, initial_balance FROM accounts
-        WHERE ledger_id = $1 AND type IN (${typePh})`,
-      [lid, ...RECALC_ACCOUNT_TYPES]
+    // 真实账户（流水直接累加）+ 投资账户（特殊公式）一并重算
+    const accs = await select<{ id: number; name: string; type: string; balance: number; initial_balance: number | null }>(
+      `SELECT id, name, type, balance, initial_balance FROM accounts
+        WHERE ledger_id = $1 AND (type IN (${typePh}) OR type = $${RECALC_ACCOUNT_TYPES.length + 2})`,
+      [lid, ...RECALC_ACCOUNT_TYPES, 'investment']
     );
     const changed: { id: number; name: string; before: number; after: number }[] = [];
     for (const a of accs) {
       // 逐笔净影响：转入本账户的 transfer 与 income/borrow/repay_in 记 +，本账户出账的其余类型记 −
       const delta = await getAccountNetFlow(a.id);
+      let after = (a.initial_balance ?? 0) + delta;
+      if (a.type === 'investment') {
+        // 投资账户：现金 = 初始 + Σ流水 − Σ持仓成本（持仓现金调整净影响恒等于 −当前持仓成本）
+        const [cvRow] = await select<{ cv: number | null }>(
+          `SELECT COALESCE(SUM(quantity*cost),0) AS cv FROM account_holdings WHERE account_id = $1`, [a.id]
+        );
+        after -= Number(cvRow?.cv ?? 0);
+      }
       // 不做金额四舍五入：与 applyBalance 的累加行为保持一致，重算才能真正幂等
-      const after = (a.initial_balance ?? 0) + delta;
       if (after !== a.balance) {
         await execute(`UPDATE accounts SET balance = $1 WHERE id = $2`, [after, a.id]);
         changed.push({ id: a.id, name: a.name, before: a.balance, after });

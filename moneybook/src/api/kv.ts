@@ -64,31 +64,42 @@ export function getRawKV(key: string): string | null {
   return cache.has(key) ? cache.get(key) as string : null;
 }
 
-/** 写穿：更新内存缓存 + 异步写库（非 Tauri 运行时仅更新内存；失败仅告警，不影响本次会话） */
-export async function setKV(key: string, value: string): Promise<void> {
+/** 写穿：更新内存缓存 + 异步写库。返回是否落库成功——写库失败时回滚内存到旧值并返回 false，
+ * 避免「界面显示已保存、重启后丢失」的假保存；调用方可根据返回值提示用户。 */
+export async function setKV(key: string, value: string): Promise<boolean> {
+  const prev = cache.get(key);
   cache.set(key, value);
-  if (!isTauriRuntime()) return;
+  if (!isTauriRuntime()) return true;
   try {
     await execute(
       `INSERT INTO settings (key, value) VALUES ($1, $2)
        ON CONFLICT(key) DO UPDATE SET value = $2`,
       [key, value]
     );
+    return true;
   } catch (e) {
+    // 写库失败：回滚内存缓存到旧值，保持「内存 ↔ 数据库」一致
+    if (prev === undefined) cache.delete(key); else cache.set(key, prev);
     // eslint-disable-next-line no-console
-    console.error(`[kv] 写入偏好项 ${key} 失败：`, e);
+    console.error(`[kv] 写入偏好项 ${key} 失败（已回滚）：`, e);
+    return false;
   }
 }
 
-/** 删除偏好项（内存 + 数据库） */
-export async function removeKV(key: string): Promise<void> {
+/** 删除偏好项（内存 + 数据库）。写库失败时回滚内存并返回 false。 */
+export async function removeKV(key: string): Promise<boolean> {
+  const prev = cache.get(key);
   cache.delete(key);
-  if (!isTauriRuntime()) return;
+  if (!isTauriRuntime()) return true;
   try {
     await execute(`DELETE FROM settings WHERE key = $1`, [key]);
+    return true;
   } catch (e) {
+    // 删除失败：恢复内存缓存
+    if (prev !== undefined) cache.set(key, prev);
     // eslint-disable-next-line no-console
-    console.error(`[kv] 删除偏好项 ${key} 失败：`, e);
+    console.error(`[kv] 删除偏好项 ${key} 失败（已回滚）：`, e);
+    return false;
   }
 }
 
