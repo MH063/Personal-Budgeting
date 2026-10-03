@@ -8,7 +8,7 @@ import { Input } from '@/components/ui/input';
 import { ConfirmDialog } from '@/components/common/ConfirmDialog';
 import { LAST_BACKUP_KEY, STORAGE_SAVE_DIR_KEY } from '@/lib/constants';
 import { exportAllData, maskExportBundle } from '@/api/dataExport';
-import { downloadJSON } from '@/lib/export';
+import { downloadJSON, saveJSON } from '@/lib/export';
 import { seedTestData } from '@/api/seed';
 import { resetAllData } from '@/api/factoryReset';
 
@@ -78,12 +78,27 @@ export default function BackupRestore() {
     setPendingRestore(null);
   }
 
-  /** 一键导出全部数据为 JSON（可读/可迁移；默认脱敏，杜绝导出即泄露） */
+  /** 一键导出全部数据为 JSON（可读/可迁移；默认脱敏，杜绝导出即泄露）。
+   *  桌面版弹系统保存对话框由用户选定位置，并在成功提示中显示完整保存路径
+   *  （历史缺陷：blob 静默下载不弹框不报路径，用户不知数据导到了哪儿）。 */
   async function handleExportAll(inclSensitive: boolean) {
     try {
       const raw = await exportAllData();
       const bundle = maskExportBundle(raw, inclSensitive); // 默认脱敏
-      downloadJSON(`全部数据_${dayjs().format('YYYY-MM-DD')}${inclSensitive ? '_含敏感' : ''}.json`, bundle);
+      const filename = `全部数据_${dayjs().format('YYYY-MM-DD')}${inclSensitive ? '_含敏感' : ''}.json`;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const isTauri = typeof window !== 'undefined' && (window as any)?.__TAURI_INTERNALS__ !== undefined;
+      if (isTauri) {
+        const dest = await saveJSON(filename, bundle);
+        if (!dest) return; // 用户取消保存对话框
+        toast.success(
+          inclSensitive
+            ? `已导出全部数据（含敏感字段，请妥善保管）：${dest}`
+            : `已导出全部数据（备注/卡号等已脱敏；AI 密钥与操作日志不包含，恢复后需重新填写 AI 配置），已保存到：${dest}`
+        );
+        return;
+      }
+      downloadJSON(filename, bundle);
       toast.success(inclSensitive ? '已导出全部数据（含敏感字段，请妥善保管）' : '已导出全部数据（备注/卡号等已脱敏；AI 密钥与操作日志不包含，恢复后需重新填写 AI 配置）');
     } catch (e) {
       toast.error(`导出失败：${(e as Error).message}`);

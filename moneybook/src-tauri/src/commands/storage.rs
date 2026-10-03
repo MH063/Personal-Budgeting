@@ -259,3 +259,57 @@ pub fn open_url(url: String) -> Result<(), String> {
         Err("当前平台不支持打开外部链接".to_string())
     }
 }
+
+/// 用系统默认程序打开本地文件（报表 HTML 等临时文件）。
+/// 安全约束：仅放行「已存在的文件绝对路径」，直接交给 Shell 关联程序，不经命令解析。
+#[tauri::command]
+pub fn open_file(path: String) -> Result<(), String> {
+    let p = std::path::PathBuf::from(&path);
+    if !p.is_file() {
+        return Err(format!("文件不存在：{path}"));
+    }
+    #[cfg(windows)]
+    {
+        std::process::Command::new("rundll32.exe")
+            .args(["url.dll,FileProtocolHandler", p.to_string_lossy().as_ref()])
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        Err("当前平台不支持打开外部文件".to_string())
+    }
+}
+
+/// 把报表 HTML 写入系统临时目录并用系统默认浏览器打开（返回文件路径）。
+/// 背景：报表「导出 PDF(打印)」原用隐藏 iframe 触发 WebView2 的 window.print()，
+/// 打印对话框嵌在应用内部，体验不佳；改经默认浏览器打开报表文件，
+/// 打印/另存为 PDF 的窗口呈现在外部浏览器中。
+/// 安全：HTML 由前端只读业务数据生成；写入临时目录、随后 Shell 关联程序打开，
+/// 不做任何命令解析。
+#[tauri::command]
+pub fn open_report_in_browser(html: String) -> Result<String, String> {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let file = std::env::temp_dir().join(format!("moneybook-report-{ts}.html"));
+    std::fs::write(&file, html).map_err(|e| format!("写入报表文件失败：{e}"))?;
+    #[cfg(windows)]
+    {
+        std::process::Command::new("rundll32.exe")
+            .args(["url.dll,FileProtocolHandler", file.to_string_lossy().as_ref()])
+            .spawn()
+            .map_err(|e| {
+                let _ = std::fs::remove_file(&file);
+                format!("打开浏览器失败：{e}")
+            })?;
+        Ok(file.to_string_lossy().to_string())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = std::fs::remove_file(&file);
+        Err("当前平台不支持打开外部浏览器".to_string())
+    }
+}

@@ -114,6 +114,8 @@ pub fn run() {
             commands::storage::clean_storage_cache,
             commands::storage::open_folder,
             commands::storage::open_url,
+            commands::storage::open_file,
+            commands::storage::open_report_in_browser,
             // 真原子事务：跨多次 IPC 复用同一条连接（插件连接池无法做到）
             commands::tx::tx_begin,
             commands::tx::tx_execute,

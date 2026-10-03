@@ -92,6 +92,9 @@ export async function exportToCsv(params: ExportParams): Promise<string> {
     备注: r.note ?? '',
     分类: r.category_name ?? '',
   }));
+  // 空数据与「用户取消保存」必须区分：历史缺陷——无记录时 toCsv 返回 null，
+  // 被误报为「已取消导出」，误导用户以为操作被取消。这里提前拦截并明确提示。
+  if (!data.length) return '区间内暂无交易记录，无可导出数据';
   const saved = await toCsv(data, `transactions_${params.from}_${params.to}.csv`);
   if (saved === null) return '已取消导出';
   return `已导出 ${data.length} 条记录${saved === '已触发下载' ? '' : `，文件已保存`}`;
@@ -147,8 +150,8 @@ export async function exportToPdf(params: ExportParams): Promise<string> {
   const expense = rows.filter((r) => r.type === 'expense').reduce((s, r) => s + r.amount, 0);
   const surplus = income - expense;
 
-  // 环境不支持 DOM 打印时 fallback 导出纯文本
-  if (typeof window === 'undefined' || typeof window.print !== 'function') {
+  // 无 DOM 环境（SSR 等）时 fallback 导出纯文本
+  if (typeof window === 'undefined') {
     const lines = [
       `交易报表 ${params.from} ~ ${params.to}`,
       `收入: ${income}    支出: ${expense}    结余: ${surplus}`,
@@ -224,6 +227,20 @@ export async function exportToPdf(params: ExportParams): Promise<string> {
   </table>
 </body>
 </html>`;
+
+  // 桌面（Tauri）环境：把报表写入临时文件并用系统默认浏览器打开，
+  // 打印/另存为 PDF 的窗口在外部浏览器呈现（历史缺陷：WebView2 内 window.print()
+  // 的打印对话框嵌在应用内部，体验不佳）。
+  const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+  if (isTauri) {
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      const p = await invoke<string>('open_report_in_browser', { html });
+      return `报表已用默认浏览器打开（${p}），请在浏览器中打印或「另存为 PDF」`;
+    } catch (e) {
+      return `打开浏览器失败：${(e as Error).message}，请改用 CSV 导出`;
+    }
+  }
 
   if (!printHtml(html)) {
     return '当前环境无法触发打印，请改用 CSV 导出';
