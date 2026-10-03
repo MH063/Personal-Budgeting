@@ -67,6 +67,12 @@ fn get_migrations() -> Vec<Migration> {
             sql: include_str!("../migrations/010_dup_reviews.sql"),
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 11,
+            description: "dedupe_preset_categories",
+            sql: include_str!("../migrations/011_dedupe_preset_categories.sql"),
+            kind: MigrationKind::Up,
+        },
     ]
 }
 
