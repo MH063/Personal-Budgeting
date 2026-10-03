@@ -32,16 +32,16 @@ function row(name: string, ym: string, amt: number, icon = '🍜', color = '#000
 }
 
 describe('fetchMonthlySeries：月份窗口与补零', () => {
-  it('跨年窗口（12月~1月）月份顺序正确：ymList 升序', async () => {
-    // 2026-01 现在，months=3 → 窗口 2025-11,2025-12,2026-01
+  it('窗口=上月往前 N 个自然月：ymList 升序且末位为上月', async () => {
+    // 2026-01-15 现在，months=3 → 窗口 2025-10,2025-11,2025-12（含上月，不含当月）
     selectMock.mockResolvedValue([]);
     const { ymList } = await fetchMonthlySeries('expense', 3);
-    expect(ymList).toEqual(['2025-11', '2025-12', '2026-01']);
+    expect(ymList).toEqual(['2025-10', '2025-11', '2025-12']);
   });
 
   it('缺失月份补 0，不因某月无记录而错位', async () => {
-    // 餐饮只有 11 月与 1 月记录，12 月缺失 → 12 月补 0
-    selectMock.mockResolvedValue([row('餐饮', '2025-11', 100), row('餐饮', '2026-01', 150)]);
+    // 餐饮只有 10 月与 12 月记录，11 月缺失 → 11 月补 0
+    selectMock.mockResolvedValue([row('餐饮', '2025-10', 100), row('餐饮', '2025-12', 150)]);
     const { categories } = await fetchMonthlySeries('expense', 3);
     const c = categories[0];
     expect(c.values).toEqual([100, 0, 150]);
@@ -58,7 +58,8 @@ describe('buildExpenseForecast：从数据构造预测', () => {
   });
 
   it('只有 1 个月数据 → 仅一条分类预测，sampleMonths=1、可靠度低', async () => {
-    selectMock.mockResolvedValue([row('餐饮', '2026-01', 300)]);
+    // 上月（窗口末位）有数据 → lastActual=300
+    selectMock.mockResolvedValue([row('餐饮', '2025-12', 300)]);
     const res = await buildExpenseForecast(6);
     expect(res.categories).toHaveLength(1);
     expect(res.categories[0].name).toBe('餐饮');
@@ -70,8 +71,8 @@ describe('buildExpenseForecast：从数据构造预测', () => {
   it('正常跨年序列 → 用上期结余窗口聚合出 totalLast/totalPredicted', async () => {
     // 餐饮 3 个月 100/120/140；交通 2 个月 50/60（首月缺 → 0）
     selectMock.mockResolvedValue([
-      row('餐饮', '2025-11', 100), row('餐饮', '2025-12', 120), row('餐饮', '2026-01', 140),
-      row('交通', '2025-12', 50), row('交通', '2026-01', 60),
+      row('餐饮', '2025-10', 100), row('餐饮', '2025-11', 120), row('餐饮', '2025-12', 140),
+      row('交通', '2025-11', 50), row('交通', '2025-12', 60),
     ]);
     const res = await buildExpenseForecast(3);
     const names = res.categories.map((c) => c.name);

@@ -19,7 +19,7 @@ export default function RepaymentForm({ loan, open, onOpenChange }: {
 }) {
   const { repay } = useLoanMutations();
   const [accountId, setAccountId] = useState<number | undefined>();
-  const { register, handleSubmit, setValue, watch, reset } = useForm<{ amount: string; interest: string; date: string; note: string }>({
+  const { register, handleSubmit, setValue, watch, reset, formState } = useForm<{ amount: string; interest: string; date: string; note: string }>({
     defaultValues: { amount: '', interest: '', date: dayjs().format('YYYY-MM-DD'), note: '' },
   });
 
@@ -100,7 +100,12 @@ export default function RepaymentForm({ loan, open, onOpenChange }: {
     : null;
 
   return (
-    <Modal open={open} onClose={() => onOpenChange(false)} title={`向 ${loan.counterparty} 还款`}>
+    <Modal open={open} onClose={() => onOpenChange(false)} title={`向 ${loan.counterparty} 还款`} guard={{
+      // 未保存守卫：录到一半误按 Esc/✕ 时不直接关闭，先确认防输入丢失
+      dirty: formState.isDirty,
+      // 「保存并关闭」：触发校验+提交，成功后弹窗自行关闭
+      onSave: () => { void handleSubmit(onSubmit)(); },
+    }}>
       <div className="mb-3 rounded-lg bg-black/5 p-3 text-sm dark:bg-white/5">
         剩余待还本金：<strong>¥{loan.remaining.toFixed(2)}</strong>（{loan.direction === 'lend' ? '借出待收' : '借入待还'}）
         建议剩余利息：<strong style={{ color: '#F59E0B' }}>¥{remainingInterest.toFixed(2)}</strong>

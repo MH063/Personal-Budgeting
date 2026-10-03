@@ -16,7 +16,7 @@ export default function OverdueInterestForm({ loan, open, onOpenChange }: {
 }) {
   const { repayOverdue } = useLoanMutations();
   const [accountId, setAccountId] = useState<number | undefined>();
-  const { register, handleSubmit, reset } = useForm<{ amount: string; date: string }>({
+  const { register, handleSubmit, reset, formState } = useForm<{ amount: string; date: string }>({
     defaultValues: { amount: '', date: dayjs().format('YYYY-MM-DD') },
   });
   useEffect(() => {
@@ -45,7 +45,12 @@ export default function OverdueInterestForm({ loan, open, onOpenChange }: {
   }
 
   return (
-    <Modal open={open} onClose={() => onOpenChange(false)} title={`单独偿还逾期利息 · ${loan.counterparty}`}>
+    <Modal open={open} onClose={() => onOpenChange(false)} title={`单独偿还逾期利息 · ${loan.counterparty}`} guard={{
+      // 未保存守卫：录到一半误按 Esc/✕ 时不直接关闭，先确认防输入丢失
+      dirty: formState.isDirty,
+      // 「保存并关闭」：触发校验+提交，成功后弹窗自行关闭
+      onSave: () => { void handleSubmit(onSubmit)(); },
+    }}>
       <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
         <div className="rounded-lg bg-[var(--color-danger)]/10 px-3 py-2 text-sm">
           <div className="flex justify-between text-muted">

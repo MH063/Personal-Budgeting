@@ -1,5 +1,5 @@
 import dayjs from 'dayjs';
-import { select } from './db';
+import { select, execute } from './db';
 import { chat } from './llm';
 import { sanitizeForClassification } from '@/lib/sanitize';
 import { readAIConfig } from '@/stores/useAIStore';
@@ -212,4 +212,46 @@ export async function aiVerifyDuplicates(
   } catch {
     return locals; // 云端失败 → 回退本地判定，功能不中断
   }
+}
+
+// ---------------------------------------------------------------------------
+// 判定持久化（用户要求：人工复核 / AI 判定结果落库，刷新不丢，可随时推翻）
+// ---------------------------------------------------------------------------
+
+/** 持久化的一条判定记录（dup_reviews 表） */
+export interface DupReview {
+  id: number;
+  pair_key: string;
+  verdict: DupVerdict;
+  source: 'user' | 'ai';
+  ledger_id: number;
+  reviewed_at: string;
+}
+
+/** 查询当前账本的全部持久化判定（用户 + AI 缓存） */
+export async function listDupReviews(): Promise<DupReview[]> {
+  return select<DupReview>(`SELECT * FROM dup_reviews WHERE ledger_id = $1`, [currentLedgerId()]);
+}
+
+/**
+ * 写入一条判定（幂等 upsert，按 pair_key + source + ledger 去重）：
+ *  - source='user'：用户手动判定（确认重复 / 标记正常 / 待核查），展示优先级最高；
+ *  - source='ai'：AI 判定缓存（刷新不丢），用户判定可随时覆盖。
+ * 已判定的配对不再进入「待处理」列表，可在「已处理」中展开回顾。
+ */
+export async function saveDupReview(pairKey: string, verdict: DupVerdict, source: 'user' | 'ai'): Promise<void> {
+  await execute(
+    `INSERT INTO dup_reviews (pair_key, verdict, source, ledger_id, reviewed_at)
+     VALUES ($1,$2,$3,$4,datetime('now','localtime'))
+     ON CONFLICT(pair_key, source, ledger_id) DO UPDATE SET verdict=$2, reviewed_at=datetime('now','localtime')`,
+    [pairKey, verdict, source, currentLedgerId()]
+  );
+}
+
+/** 删除一条持久化判定（用于「撤销人工判定」，使配对重新进入待处理列表） */
+export async function deleteDupReview(pairKey: string, source: 'user' | 'ai' = 'user'): Promise<void> {
+  await execute(
+    `DELETE FROM dup_reviews WHERE pair_key = $1 AND source = $2 AND ledger_id = $3`,
+    [pairKey, source, currentLedgerId()]
+  );
 }

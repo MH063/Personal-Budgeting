@@ -9,12 +9,13 @@ import {
 import { loadImportRules, saveImportRules, pickRuleKeyword, shouldLearnCorrection, learnRuleFromCorrection, type LearnedRuleCandidate } from '@/api/importRules';
 import { recalcAccountBalances, updateTransaction } from '@/api/transactions';
 import { isZip, tryExtractZip, detectZipEncryption } from '@/api/importZip';
-import { recordImportLog, listImportLogs, type ImportLog } from '@/api/importLog';
+import { recordImportLog, listImportLogs, listImportSkips, type ImportLog, type ImportSkip } from '@/api/importLog';
 import { recordAudit } from '@/api/audit';
 import { suggestForText } from '@/api/aiSuggest';
 import { Button } from '@/components/ui/button';
 import { Hint } from '@/components/ui/hint';
 import { Modal } from '@/components/ui/modal';
+import { ConfirmDialog } from '@/components/common/ConfirmDialog';
 import { formatMoney } from '@/lib/format';
 
 /** 支付宝等导出的 CSV 常为 GBK 编码：优先按 UTF-8 解码，若出现替换符则视为 GBK 重解。 */
@@ -87,6 +88,11 @@ export default function ImportManage() {
   // 解析结果弹窗：选择文件识别成功后以弹窗形式集中展示（用户要求，避免大表格挤在页面）；
   // 弹窗内可编辑修正并直接「开始导入」，关闭后预览数据保留在内存直至下次解析
   const [previewOpen, setPreviewOpen] = useState(false);
+  // 导入历史「跳过」明细查看弹窗：某次导入被跳过的数据（行号 + 原因 + 原始字段）持久化于
+  // import_skips 表，可追溯并可一键补导入（用户要求：跳过的数据不能无声无息丢掉）
+  const [skipView, setSkipView] = useState<{ log: ImportLog; skips: ImportSkip[]; loading: boolean } | null>(null);
+  // 「补导入」二次确认：批量还原跳过数据为待导入行前先确认，避免误触加入大量行
+  const [restoreConfirmOpen, setRestoreConfirmOpen] = useState(false);
   // 用户自定义资金流向规则（存本机 settings，kv.importRules）
   const [rules, setRules] = useState<ImportRule[]>(() => loadImportRules());
   const [rulesOpen, setRulesOpen] = useState(false);
@@ -517,12 +523,20 @@ export default function ImportManage() {
       } catch (e) {
         toast.warning(`余额重算未完成：${(e as Error).message}（可用「重算账户余额」手动重试）`);
       }
-      // 写入导入审计，并刷新历史（审计失败不影响导入本身）
+      // 写入导入审计，并刷新历史（审计失败不影响导入本身）。
+      // 被跳过的行（疑似重复 / 金额无效 / 类型无法识别等）连同原始字段一并持久化到
+      // import_skips 表：导入历史「跳过」列可点开查看明细，日后可一键补导入。
       try {
+        const rowByLine = new Map(finalRows.map((r) => [r.line, r]));
+        const skips = res.skipped.map((s) => ({
+          line: s.line, reason: s.reason,
+          row: rowByLine.get(s.line) ?? null,
+        }));
         await recordImportLog({
           fileName: fileMeta.current.names, fileCount: fileMeta.current.count,
           imported: res.imported, skipped: res.skipped.length, duplicates: res.duplicates,
           createdAccounts: res.createdAccounts.length, createdCategories: res.createdCategories.length,
+          skips,
         });
         const hist = await listImportLogs();
         setImportHist(hist);
@@ -563,6 +577,55 @@ export default function ImportManage() {
     } finally {
       setBusy(false);
     }
+  }
+
+  /** 打开某次导入的「跳过明细」弹窗：从 import_skips 表读取持久化的明细（行号 + 原因 + 原始字段） */
+  async function openSkipView(log: ImportLog) {
+    setSkipView({ log, skips: [], loading: true });
+    try {
+      const skips = await listImportSkips(log.id);
+      setSkipView({ log, skips, loading: false });
+    } catch {
+      setSkipView({ log, skips: [], loading: false });
+      toast.error('读取跳过明细失败');
+    }
+  }
+
+  /** 把某次导入的跳过明细还原为可导入行，追加到当前预览后即可重新导入（补导入）。
+   *  还原时：仅取持久化的原始字段（日期/金额/账户等），清除跳过标记作为正常行；
+   *  行标识重新盖章，避免与当前预览中已有行互相覆盖（同文件行号可能重复）。 */
+  function restoreSkipsToImport(skips: ImportSkip[]) {
+    const restored: ImportRow[] = [];
+    for (const sk of skips) {
+      try {
+        const row = JSON.parse(sk.row_data) as Partial<ImportRow> & { type?: string };
+        if (!row || typeof row !== 'object' || !row.date || !Number(row.amount)) continue;
+        const type = ['income', 'expense', 'transfer', 'repay_in'].includes(String(row.type))
+          ? (row.type as ImportRow['type'])
+          : 'expense';
+        restored.push({
+          date: String(row.date),
+          type,
+          amount: Number(row.amount),
+          account: String(row.account ?? '未识别账户'),
+          toAccount: row.toAccount ?? '',
+          category: row.category ?? '',
+          note: row.note ?? '',
+          payTime: row.payTime ?? '',
+          payMethod: row.payMethod ?? '',
+          payee: row.payee ?? '',
+          orderNo: row.orderNo ?? '',
+          merchantOrderNo: row.merchantOrderNo ?? '',
+          line: sk.line,
+          _rowKey: `skip:${sk.log_id}:${sk.line}`,
+        });
+      } catch { /* 单条还原失败忽略，其余照常补导入 */ }
+    }
+    if (!restored.length) { toast.error('该批跳过明细缺少可还原的关键字段（日期/金额），无法补导入'); return; }
+    setRows((prev) => [...prev, ...restored]);
+    setSkipView(null);
+    setPreviewOpen(true);
+    toast.success(`已将 ${restored.length} 条跳过的数据加入待导入列表，请核对后开始导入`);
   }
 
   /** 更新某「待核对」项的本地选择（类型 / 账户 / 转入账户），点「保存」时才回写库 */
@@ -878,7 +941,19 @@ export default function ImportManage() {
                     <td className="px-2 py-1">{h.file_name}</td>
                     <td className="px-2 py-1">{h.file_count}</td>
                     <td className="px-2 py-1">{h.imported}</td>
-                    <td className="px-2 py-1">{h.skipped}</td>
+                    <td className="px-2 py-1">
+                      {h.skipped > 0 ? (
+                        <button
+                          className="font-medium underline decoration-dotted underline-offset-2 text-[var(--color-primary-fg)] hover:opacity-80"
+                          title="查看被跳过的数据明细（可追溯、可补导入）"
+                          onClick={() => void openSkipView(h)}
+                        >
+                          {h.skipped}
+                        </button>
+                      ) : (
+                        h.skipped
+                      )}
+                    </td>
                     <td className="px-2 py-1 text-[var(--color-warning,#F59E0B)]">{h.duplicates}</td>
                     <td className="px-2 py-1">{h.created_accounts}</td>
                     <td className="px-2 py-1">{h.created_categories}</td>
@@ -892,6 +967,79 @@ export default function ImportManage() {
 
       {/* 解析结果弹窗：选择文件识别成功后集中展示（用户要求，避免预览大表格挤在页面）。
           弹窗内可编辑修正误判，确认后直接「开始导入」；关闭仅收起弹窗，预览数据保留在内存。 */}
+      {/* 导入历史「跳过」明细弹窗：持久化的跳过数据（行号 + 原因 + 原始字段）可追溯、可补导入 */}
+      <Modal
+        open={!!skipView}
+        onClose={() => setSkipView(null)}
+        title={skipView ? `跳过数据明细（${skipView.skips.length} 条 · ${skipView.log.imported_at}）` : '跳过数据明细'}
+      >
+        {skipView && (
+          <div className="space-y-3">
+            <p className="text-xs text-muted">
+              以下数据在导入时被跳过、未进入账本；原因与原始字段已持久化保存，核对后可一键补导入。
+            </p>
+            {skipView.loading ? (
+              <p className="py-6 text-center text-xs text-muted">读取中…</p>
+            ) : skipView.skips.length === 0 ? (
+              <p className="py-6 text-center text-xs text-muted">该次导入没有持久化的跳过明细。</p>
+            ) : (
+              <>
+                <div className="max-h-72 overflow-auto">
+                  <table className="w-full text-xs">
+                    <thead className="sticky top-0 bg-black/5 text-left text-muted dark:bg-white/5">
+                      <tr>
+                        <th className="px-2 py-1.5">行号</th>
+                        <th className="px-2 py-1.5">原因</th>
+                        <th className="px-2 py-1.5">金额</th>
+                        <th className="px-2 py-1.5">账户</th>
+                        <th className="px-2 py-1.5">日期</th>
+                        <th className="px-2 py-1.5">备注</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {skipView.skips.map((sk) => {
+                        let row: Record<string, unknown> = {};
+                        try { row = JSON.parse(sk.row_data) as Record<string, unknown>; } catch { /* 解析失败按空处理 */ }
+                        return (
+                          <tr key={sk.id} className="border-t border-[var(--border)]">
+                            <td className="px-2 py-1 text-muted">第{sk.line}行</td>
+                            <td className="px-2 py-1" title={sk.reason}>{sk.reason}</td>
+                            <td className="px-2 py-1">{row.amount != null ? Number(row.amount) : '—'}</td>
+                            <td className="px-2 py-1">{String(row.account ?? '—')}</td>
+                            <td className="px-2 py-1 text-muted">{String(row.date ?? '—')}</td>
+                            <td className="max-w-[180px] truncate px-2 py-1 text-muted" title={String(row.note ?? '')}>
+                              {String(row.note ?? '—')}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+                <div className="flex justify-end gap-2">
+                  <Button size="sm" variant="outline" onClick={() => setSkipView(null)}>关闭</Button>
+                  {/* 先弹二次确认，避免误触将大量跳过行批量加入待导入列表 */}
+                  <Button size="sm" onClick={() => setRestoreConfirmOpen(true)}>补导入（加入待导入列表）</Button>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+      </Modal>
+
+      {/* 补导入二次确认：还原为待导入行（不直接进账本），确认后才加入预览列表供核对后导入 */}
+      <ConfirmDialog
+        open={restoreConfirmOpen}
+        title="补导入跳过的数据"
+        description={`将把本次 ${skipView?.skips.length ?? 0} 条被跳过的数据还原为待导入行（清除跳过标记、按原始字段恢复日期/金额/账户等），加入导入预览列表。它们不会直接进入账本，请在预览中核对修正后点击「开始导入」完成入库。确定补导入吗？`}
+        confirmText="确认补导入"
+        onConfirm={() => {
+          if (skipView) restoreSkipsToImport(skipView.skips);
+          setRestoreConfirmOpen(false);
+        }}
+        onClose={() => setRestoreConfirmOpen(false)}
+      />
+
       <Modal open={previewOpen} onClose={() => setPreviewOpen(false)} title={`导入解析结果（${validRows.length} 条）`}>
         <div className="space-y-3">
           {/* 概要：识别 / 跳过 / 疑似重复 / 待确认 */}

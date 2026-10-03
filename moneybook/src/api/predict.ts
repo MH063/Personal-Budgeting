@@ -69,9 +69,14 @@ export interface CategorySeries {
  */
 export async function fetchMonthlySeries(type: 'income' | 'expense', months = 6): Promise<{ ymList: string[]; categories: CategorySeries[] }> {
   const end = dayjs().subtract(1, 'month').endOf('month').format('YYYY-MM-DD');
-  const start = dayjs().subtract(months - 1, 'month').startOf('month').format('YYYY-MM-DD');
+  // 窗口起点 = 上月向前 months 个月（含上月共 months 个自然月）
+  // 历史缺陷：起点曾用 subtract(months-1)（只覆盖 months-1 个月），
+  // 且 ymList 曾用 subtract(months-1-i) 把「当月」排进序列（窗口内无当月数据），
+  // 导致 lastActual（上月支出）恒为 0、环比恒为 -100%。此处两者一并修正：
+  // 窗口与序列严格对齐为「上月往前 months 个月」，最后一位即上月。
+  const start = dayjs().subtract(months, 'month').startOf('month').format('YYYY-MM-DD');
   const ymList: string[] = [];
-  for (let i = 0; i < months; i++) ymList.push(dayjs().subtract(months - 1 - i, 'month').format('YYYY-MM'));
+  for (let i = 0; i < months; i++) ymList.push(dayjs().subtract(months - i, 'month').format('YYYY-MM'));
 
   const rows = await select<{ name: string; icon: string; color: string; ym: string; amt: number }>(
     `SELECT c.name, c.icon, c.color, strftime('%Y-%m', t.date) AS ym, SUM(t.amount) AS amt

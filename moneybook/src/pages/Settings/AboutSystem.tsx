@@ -2,7 +2,8 @@ import { Link } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { formatAppVersion } from '@/lib/appVersion';
 import { useUpdateStore } from '@/stores/useUpdateStore';
-import { openExternal, UPDATE_RELEASES_PAGE } from '@/lib/update';
+import { openInAppBrowser } from '@/lib/browser';
+import { UPDATE_RELEASES_PAGE } from '@/lib/update';
 
 /**
  * 关于系统：版本信息、更新检查（内置 GitHub Releases）、版权与技术架构说明。
@@ -29,7 +30,7 @@ export default function AboutSystem() {
             <Button size="sm" onClick={() => void checkManually()} disabled={checking}>
               {checking ? '检查中…' : '检查更新'}
             </Button>
-            <Button variant="outline" size="sm" onClick={() => void openExternal(UPDATE_RELEASES_PAGE)}>
+            <Button variant="outline" size="sm" onClick={() => void openInAppBrowser(UPDATE_RELEASES_PAGE)}>
               前往下载页
             </Button>
           </div>

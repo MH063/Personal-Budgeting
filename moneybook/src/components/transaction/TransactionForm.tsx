@@ -193,15 +193,16 @@ export default function TransactionForm({ open, onOpenChange, defaultType = 'exp
   /** 一键套用模板：把模板回填到表单（金额留空的模板提示手填，金额必填由保存时校验兜底） */
   function applyTpl(t: TxnTemplate) {
     const f = templateToForm(t);
-    form.setValue('type', f.type);
-    if (f.amount != null) form.setValue('amount', f.amount as unknown as number);
-    if (f.accountId) form.setValue('accountId', f.accountId as unknown as number);
-    if (f.categoryId) form.setValue('categoryId', f.categoryId);
-    if (f.toAccountId) form.setValue('toAccountId', f.toAccountId);
-    form.setValue('note', f.note);
-    form.setValue('payee', f.payee);
-    form.setValue('payMethod', f.payMethod);
-    form.setValue('tagIds', f.tagIds);
+    // 用户点击套用模板属于交互修改，需标记 dirty 以便未保存守卫生效
+    form.setValue('type', f.type, { shouldDirty: true });
+    if (f.amount != null) form.setValue('amount', f.amount as unknown as number, { shouldDirty: true });
+    if (f.accountId) form.setValue('accountId', f.accountId as unknown as number, { shouldDirty: true });
+    if (f.categoryId) form.setValue('categoryId', f.categoryId, { shouldDirty: true });
+    if (f.toAccountId) form.setValue('toAccountId', f.toAccountId, { shouldDirty: true });
+    form.setValue('note', f.note, { shouldDirty: true });
+    form.setValue('payee', f.payee, { shouldDirty: true });
+    form.setValue('payMethod', f.payMethod, { shouldDirty: true });
+    form.setValue('tagIds', f.tagIds, { shouldDirty: true });
     toast.success(f.amount != null ? `已套用模板「${t.name}」` : `已套用模板「${t.name}」，请填写本次金额`);
   }
 
@@ -236,11 +237,11 @@ export default function TransactionForm({ open, onOpenChange, defaultType = 'exp
   /** 采纳补全推荐的标签（追加，不覆盖已有选择） */
   function adoptTag(id: number) {
     const cur = form.watch('tagIds') ?? [];
-    if (!cur.includes(id)) form.setValue('tagIds', [...cur, id]);
+    if (!cur.includes(id)) form.setValue('tagIds', [...cur, id], { shouldDirty: true });
   }
   /** 采纳补全推荐的商户名到收款方 */
   function adoptMerchant(name: string) {
-    form.setValue('payee', name);
+    form.setValue('payee', name, { shouldDirty: true });
   }
 
   async function onSubmit(d: FormData) {
@@ -315,18 +316,19 @@ export default function TransactionForm({ open, onOpenChange, defaultType = 'exp
 
   // 把 OCR 识别出的记账项回填到表单（类型/金额/分类/账户/日期/备注/交易扩展字段）
   function applyOcrItem(item: AiBookItem) {
-    form.setValue('type', item.type);
-    form.setValue('amount', item.amount as unknown as number);
-    if (item.categoryId) form.setValue('categoryId', item.categoryId);
-    if (item.accountId) form.setValue('accountId', item.accountId as unknown as number);
-    if (item.toAccountId) form.setValue('toAccountId', item.toAccountId);
-    form.setValue('date', item.date || dayjs().format('YYYY-MM-DD'));
-    if (item.note) form.setValue('note', item.note);
-    if (item.payTime) form.setValue('payTime', item.payTime);
-    if (item.payMethod) form.setValue('payMethod', item.payMethod);
-    if (item.payee) form.setValue('payee', item.payee);
-    if (item.orderNo) form.setValue('orderNo', item.orderNo);
-    if (item.merchantOrderNo) form.setValue('merchantOrderNo', item.merchantOrderNo);
+    // OCR 回填属于用户交互，需标记 dirty 以便未保存守卫生效
+    form.setValue('type', item.type, { shouldDirty: true });
+    form.setValue('amount', item.amount as unknown as number, { shouldDirty: true });
+    if (item.categoryId) form.setValue('categoryId', item.categoryId, { shouldDirty: true });
+    if (item.accountId) form.setValue('accountId', item.accountId as unknown as number, { shouldDirty: true });
+    if (item.toAccountId) form.setValue('toAccountId', item.toAccountId, { shouldDirty: true });
+    form.setValue('date', item.date || dayjs().format('YYYY-MM-DD'), { shouldDirty: true });
+    if (item.note) form.setValue('note', item.note, { shouldDirty: true });
+    if (item.payTime) form.setValue('payTime', item.payTime, { shouldDirty: true });
+    if (item.payMethod) form.setValue('payMethod', item.payMethod, { shouldDirty: true });
+    if (item.payee) form.setValue('payee', item.payee, { shouldDirty: true });
+    if (item.orderNo) form.setValue('orderNo', item.orderNo, { shouldDirty: true });
+    if (item.merchantOrderNo) form.setValue('merchantOrderNo', item.merchantOrderNo, { shouldDirty: true });
     // 未匹配账户/分类时提示用户手动补选
     if (item.unmatched?.includes('account')) toast.warning('账户未匹配，请手动选择账户');
     if (item.unmatched?.includes('category')) toast.warning('分类未匹配，请手动选择分类');
@@ -399,14 +401,14 @@ export default function TransactionForm({ open, onOpenChange, defaultType = 'exp
     if (type !== 'income' && type !== 'expense') return;
     listCategories().then((cats) => {
       const c = cats.find((x) => x.type === type && x.name === name);
-      if (c) form.setValue('categoryId', c.id);
+      if (c) form.setValue('categoryId', c.id, { shouldDirty: true });
     });
   }
   /** 采纳推荐账户：按名称回填账户 id */
   function adoptAccount(name: string) {
     listAccounts(false).then((accs) => {
       const a = accs.find((x) => x.name === name);
-      if (a) form.setValue('accountId', a.id);
+      if (a) form.setValue('accountId', a.id, { shouldDirty: true });
     });
   }
 
@@ -417,7 +419,17 @@ export default function TransactionForm({ open, onOpenChange, defaultType = 'exp
   };
 
   return (
-    <Sheet open={open} onClose={() => onOpenChange(false)} title={isEditing ? '编辑交易' : '记一笔'}>
+    <Sheet
+      open={open}
+      onClose={() => onOpenChange(false)}
+      title={isEditing ? '编辑交易' : '记一笔'}
+      guard={{
+        // 未保存守卫：录到一半误按 Esc/✕ 时不直接关闭，先确认防输入丢失
+        dirty: form.formState.isDirty,
+        // 「保存并关闭」：触发校验+提交，成功后表单内部自行关闭
+        onSave: () => { void form.handleSubmit(onSubmit, onInvalid)(); },
+      }}
+    >
       {/* 拍照/票据录入入口：本地 OCR，图片不出本机 */}
       <div className="mb-3 flex justify-end">
         <Button type="button" variant="outline" size="sm" onClick={() => setOcrOpen(true)}>
@@ -455,7 +467,7 @@ export default function TransactionForm({ open, onOpenChange, defaultType = 'exp
         </div>
       )}
 
-      <Tabs value={type} onValueChange={(v) => form.setValue('type', v as FormData['type'])}>
+      <Tabs value={type} onValueChange={(v) => form.setValue('type', v as FormData['type'], { shouldDirty: true })}>
         <TabsList className="grid grid-cols-5">
           {TYPE_TABS.map((t) => <TabsTrigger key={t.value} value={t.value}>{t.label}</TabsTrigger>)}
         </TabsList>
@@ -477,7 +489,7 @@ export default function TransactionForm({ open, onOpenChange, defaultType = 'exp
           <div>
             <label className="mb-1 flex items-center gap-1 text-sm text-muted">分类 <RequiredStar /></label>
             <CategoryPicker type={type as 'income' | 'expense'} value={form.watch('categoryId')}
-              onChange={(id) => form.setValue('categoryId', id)} />
+              onChange={(id) => form.setValue('categoryId', id, { shouldDirty: true })} />
             {catBudget && catBudget.status !== 'ok' && (
               <BudgetHint usage={catBudget} />
             )}
@@ -486,31 +498,31 @@ export default function TransactionForm({ open, onOpenChange, defaultType = 'exp
 
         <div>
           <label className="mb-1 flex items-center gap-1 text-sm text-muted">账户 <RequiredStar /></label>
-          <AccountPicker value={form.watch('accountId')} onChange={(id) => form.setValue('accountId', id)} />
+          <AccountPicker value={form.watch('accountId')} onChange={(id) => form.setValue('accountId', id, { shouldDirty: true })} />
         </div>
 
         {type === 'transfer' && (
           <div>
             <label className="mb-1 flex items-center gap-1 text-sm text-muted">转入账户 <RequiredStar /></label>
-            <AccountPicker value={form.watch('toAccountId')} onChange={(id) => form.setValue('toAccountId', id)}
+            <AccountPicker value={form.watch('toAccountId')} onChange={(id) => form.setValue('toAccountId', id, { shouldDirty: true })}
               exclude={form.watch('accountId') ? [form.watch('accountId')!] : []} />
           </div>
         )}
 
         <div>
           <label className="mb-1 flex items-center gap-1 text-sm text-muted">日期 <RequiredStar /></label>
-          <Input type="date" value={form.watch('date')} onChange={(e) => form.setValue('date', e.target.value)} />
+          <Input type="date" value={form.watch('date')} onChange={(e) => form.setValue('date', e.target.value, { shouldDirty: true })} />
         </div>
 
         <div>
           <label className="mb-1 block text-sm text-muted">标签（可选，可多选）</label>
-          <TagPicker value={form.watch('tagIds') ?? []} onChange={(ids) => form.setValue('tagIds', ids)} />
+          <TagPicker value={form.watch('tagIds') ?? []} onChange={(ids) => form.setValue('tagIds', ids, { shouldDirty: true })} />
         </div>
 
         <div>
           <label className="mb-1 block text-sm text-muted">备注（可选）</label>
           <div className="flex items-start gap-2">
-            <Textarea rows={2} placeholder="备注" value={form.watch('note')} onChange={(e) => form.setValue('note', e.target.value)} />
+            <Textarea rows={2} placeholder="备注" value={form.watch('note')} onChange={(e) => form.setValue('note', e.target.value, { shouldDirty: true })} />
             <Button type="button" variant="outline" size="sm" onClick={runSuggest} disabled={suggesting} className="whitespace-nowrap">
               {suggesting ? '识别中…' : '智能归类'}
             </Button>
@@ -567,7 +579,7 @@ export default function TransactionForm({ open, onOpenChange, defaultType = 'exp
               <Input
                 placeholder="如 2026-09-27 19:02:40"
                 value={form.watch('payTime')}
-                onChange={(e) => form.setValue('payTime', e.target.value)}
+                onChange={(e) => form.setValue('payTime', e.target.value, { shouldDirty: true })}
               />
             </div>
             <div>
@@ -575,7 +587,7 @@ export default function TransactionForm({ open, onOpenChange, defaultType = 'exp
               <Input
                 placeholder="如 微信支付、支付宝、银行卡"
                 value={form.watch('payMethod')}
-                onChange={(e) => form.setValue('payMethod', e.target.value)}
+                onChange={(e) => form.setValue('payMethod', e.target.value, { shouldDirty: true })}
               />
             </div>
             <div>
@@ -583,7 +595,7 @@ export default function TransactionForm({ open, onOpenChange, defaultType = 'exp
               <Input
                 placeholder="收款方 / 商户全称"
                 value={form.watch('payee')}
-                onChange={(e) => form.setValue('payee', e.target.value)}
+                onChange={(e) => form.setValue('payee', e.target.value, { shouldDirty: true })}
               />
             </div>
             <div>
@@ -591,7 +603,7 @@ export default function TransactionForm({ open, onOpenChange, defaultType = 'exp
               <Input
                 placeholder="订单号 / 交易单号"
                 value={form.watch('orderNo')}
-                onChange={(e) => form.setValue('orderNo', e.target.value)}
+                onChange={(e) => form.setValue('orderNo', e.target.value, { shouldDirty: true })}
               />
             </div>
             <div>
@@ -599,7 +611,7 @@ export default function TransactionForm({ open, onOpenChange, defaultType = 'exp
               <Input
                 placeholder="商家订单号（可选）"
                 value={form.watch('merchantOrderNo')}
-                onChange={(e) => form.setValue('merchantOrderNo', e.target.value)}
+                onChange={(e) => form.setValue('merchantOrderNo', e.target.value, { shouldDirty: true })}
               />
             </div>
           </div>

@@ -9,6 +9,13 @@
 //   2) 检测到损坏（integrity_check 返回非 "ok"）时，优先用 .bak 快照覆盖回滚。
 //   3) 回滚后的库仍损坏，则把损坏文件（含 -wal/-shm 伴随文件）隔离为 moneybook.db.corrupt.<时间戳>，
 //      再重建空库（数据可去回收站/导出找回）。
+//
+// 数据安全铁律（历史血泪：曾被「删 -wal + 旧快照覆盖」误伤导致重启丢数据）：
+//   a) 无法打开库（另一实例仍占用 / 文件不可读）→ 一律不触碰数据，跳过自愈；
+//   b) 确认损坏后，必须【先隔离原库三件套（保留现场可找回）】，再尝试快照恢复；
+//      绝不先覆盖、后隔离 —— 覆盖会把原库内容顶掉，唯一可找回的只有滞后的快照；
+//   c) 绝不在回滚路径上删除 -wal/-shm：-wal 里可能有「已提交但未 checkpoint」的
+//      最新数据，删掉等于把用户最近录入的数据永久抹掉（历史上确实发生过）。
 use rusqlite::Connection;
 use tauri::Manager;
 
@@ -35,6 +42,8 @@ fn sidecar(db: &std::path::Path, suffix: &str) -> std::path::PathBuf {
 
 /// 隔离损坏文件：把 moneybook.db 及其 -wal/-shm 伴随文件一起改名留档。
 /// 只移走主文件而留下旧 WAL，重建的新库会被旧预写日志污染。
+/// 注意：隔离 = 保留现场（改名），绝不是删除 —— 被隔离文件里可能还有
+/// 「已提交但未 checkpoint」的最新数据，用户/工具仍可手动找回。
 fn quarantine(db: &std::path::Path) {
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -70,12 +79,19 @@ fn refresh_snapshot(path: &std::path::Path, bak: &std::path::Path) {
     }
 }
 
-/// 对指定库文件执行 integrity_check，返回是否正常
-fn integrity_ok(path: &std::path::Path) -> bool {
-    let Ok(conn) = Connection::open(path) else { return false };
+/// 对指定库文件执行 integrity_check。
+/// 返回值语义（区分「无法打开」与「检查失败」至关重要）：
+///  - None：库打不开（被另一实例占用 / 文件不可读 / 损坏到无法 open）——
+///    此时绝不自动恢复，否则会误伤正在被占用的正常库；
+///  - Some(true)：完整；
+///  - Some(false)：SQLite 能打开但内部不一致（确认损坏）。
+/// rusqlite::Connection::open 每次都会自动执行 WAL 恢复，故本检查天然包含
+/// 「先恢复上次异常退出遗留的 -wal」这一步。
+fn integrity_status(path: &std::path::Path) -> Option<bool> {
+    let conn = Connection::open(path).ok()?;
     match conn.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0)) {
-        Ok(v) => v.trim() == "ok",
-        Err(_) => false,
+        Ok(v) => Some(v.trim() == "ok"),
+        Err(_) => Some(false),
     }
 }
 
@@ -88,7 +104,8 @@ fn quick_ok(path: &std::path::Path) -> bool {
 }
 
 /// 启动时执行数据自检与自愈。
-/// 返回状态字符串：new（首次无库）/ ok（正常，已刷新快照）/ recovered（从快照回滚）/ recreated（重建空库）
+/// 返回状态字符串：new（首次无库）/ ok（正常，已刷新快照）/ recovered（从快照回滚）/
+/// recreated（重建空库）/ locked（库被占用或不可读，未做任何处理）。
 pub fn ensure_db_health(app: &tauri::AppHandle) -> Result<String, String> {
     let path = db_path(app)?;
     let bak = backup_path(&path);
@@ -98,29 +115,43 @@ pub fn ensure_db_health(app: &tauri::AppHandle) -> Result<String, String> {
         return Ok("new".to_string());
     }
 
-    // 1) 正常路径：库存在，先自检，再刷新安全快照（每次启动都刷新）
+    // 1) 正常路径：库存在且可打开、完整性通过 → 刷新安全快照（每次启动都刷新）。
     //    先自检后快照更稳妥：避免把已损坏的库导出成"权威快照"
-    if integrity_ok(&path) {
-        refresh_snapshot(&path, &bak);
-        return Ok("ok".to_string());
-    }
-
-    // 2) 损坏路径：尝试用快照回滚
-    if bak.exists() {
-        // 覆盖主库前先清掉残留的 -wal/-shm，避免旧预写日志与新快照混用（旧 WAL 的
-        // 未提交帧会尝试附着到已替换的库上，轻则回滚无效、重则引入不一致数据）
-        let _ = std::fs::remove_file(sidecar(&path, "-wal"));
-        let _ = std::fs::remove_file(sidecar(&path, "-shm"));
-        let _ = std::fs::copy(&bak, &path);
-        if quick_ok(&path) {
-            // 回滚成功
-            return Ok("recovered".to_string());
+    match integrity_status(&path) {
+        Some(true) => {
+            refresh_snapshot(&path, &bak);
+            return Ok("ok".to_string());
+        }
+        Some(false) => {
+            // 2) 确认损坏路径（SQLite 能打开但 integrity_check 非 ok）：
+            //    a) 先隔离原库三件套（保留现场，-wal 中未合并的数据仍可找回）；
+            //    b) 再用上次的安全快照覆盖回滚；
+            //    c) 校验通过 → recovered；仍失败 → 重建空库兜底。
+            //    顺序绝不可反过来（先覆盖后隔离 = 把原库顶掉，数据无处找回）。
+            eprintln!(
+                "[health] 数据库完整性检查未通过，先隔离原库再尝试快照恢复：{}",
+                path.display()
+            );
+            quarantine(&path);
+            if bak.exists() {
+                let _ = std::fs::copy(&bak, &path);
+                if quick_ok(&path) {
+                    println!("[health] 已从安全快照恢复数据库");
+                    return Ok("recovered".to_string());
+                }
+            }
+            println!("[health] 快照恢复失败，重建空库（原库已隔离保留在 .corrupt.*）");
+            return Ok("recreated".to_string());
+        }
+        None => {
+            // 3) 无法打开：大概率是另一实例尚未完全退出、仍持锁，或文件被占用。
+            //    此时绝不触碰数据 —— 让插件连接在启动流程中自行处理（SQLite 会等锁重试）。
+            eprintln!(
+                "[health] 数据库无法打开（可能被其他实例占用），跳过自愈，交由正常启动流程处理"
+            );
+            return Ok("locked".to_string());
         }
     }
-
-    // 3) 回滚仍失败：隔离损坏文件（含 -wal/-shm）+ 重建空库（保证应用可启动）
-    quarantine(&path);
-    Ok("recreated".to_string())
 }
 
 /// Tauri command：手动触发一次数据自检自愈（可导入设置页/启动日志）
@@ -133,8 +164,9 @@ pub fn run_db_health(app: tauri::AppHandle) -> Result<String, String> {
 pub fn status_label(status: &str) -> &'static str {
     match status {
         "new" => "首次启动，创建数据库",
-        "recovered" => "检测到损坏，已从安全快照自动恢复",
+        "recovered" => "检测到损坏，已从安全快照自动恢复（原库已隔离保留）",
         "recreated" => "检测到损坏且快照不可用，已隔离损坏文件并重建数据库",
+        "locked" => "数据库被占用或不可读，跳过自检，交由正常启动流程处理",
         _ => "数据库状态正常",
     }
 }

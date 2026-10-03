@@ -48,7 +48,11 @@ export async function getMonthlySurplus(start: string, end: string) {
   );
 }
 
-/** 净资产（总资产 - 总负债） */
+/** 净资产（总资产 - 总负债）
+ *  口径说明：账户余额统一为「资产方向」符号——资产类账户余额为正表示有资金，
+ *  credit/payable 等负债类账户余额为负表示欠款（花呗/信用卡消费 → 余额递减，负得越多欠得越多），
+ *  转正后的负债额 = −SUM(余额)。此前直接 SUM 会把负数欠款当作「负负债」从净资产中减去，
+ *  等效于把欠款加回净资产（虚增 2×|欠款|）。修正后与「Σ全部账户余额 + 持仓市值」口径严格一致。 */
 export async function getNetWorth() {
   const [assets] = await select<{ total: number }>(
     `SELECT COALESCE(SUM(balance),0) AS total FROM accounts
@@ -61,7 +65,7 @@ export async function getNetWorth() {
     [currentLedgerId()]
   );
   const totalAssets = (assets?.total ?? 0) + await getLedgerInvestmentMarketValue();
-  const totalLiab = liab?.total ?? 0;
+  const totalLiab = -(liab?.total ?? 0); // 欠款为负 → 转正；溢缴为正 → 转负（相当于资产）
   return { totalAssets, totalLiab, netWorth: totalAssets - totalLiab };
 }
 

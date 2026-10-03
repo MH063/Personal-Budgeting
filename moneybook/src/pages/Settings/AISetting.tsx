@@ -10,7 +10,7 @@ import { Modal } from '@/components/ui/modal';
 import { Hint } from '@/components/ui/hint';
 import { ConfirmDialog } from '@/components/common/ConfirmDialog';
 import { maskKey } from '@/api/encrypt';
-import { openExternal } from '@/lib/update';
+import { openInAppBrowser } from '@/lib/browser';
 import {
   fetchModels,
   getPreset,
@@ -637,12 +637,12 @@ export default function AISetting() {
                 />
               </div>
               <div className="mt-1.5 flex items-center gap-4 text-xs">
-                {/* Tauri WebView 内原生 a[target=_blank] 无法唤起系统浏览器，统一走 openExternal（Rust open_url） */}
+                {/* Tauri WebView 内原生 a[target=_blank] 无法唤起系统浏览器，统一走应用内置浏览器（失败自动回退系统浏览器） */}
                 <a
                   href={preset?.apiKeyUrl ?? '#'}
                   onClick={(e) => {
                     e.preventDefault();
-                    if (preset?.apiKeyUrl) void openExternal(preset.apiKeyUrl);
+                    if (preset?.apiKeyUrl) void openInAppBrowser(preset.apiKeyUrl);
                   }}
                   className="text-[var(--color-primary-fg)] underline-offset-4 hover:underline"
                 >
@@ -652,7 +652,7 @@ export default function AISetting() {
                   href={preset?.docUrl ?? '#'}
                   onClick={(e) => {
                     e.preventDefault();
-                    if (preset?.docUrl) void openExternal(preset.docUrl);
+                    if (preset?.docUrl) void openInAppBrowser(preset.docUrl);
                   }}
                   className="text-[var(--color-primary-fg)] underline-offset-4 hover:underline"
                 >

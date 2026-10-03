@@ -43,7 +43,7 @@ export default function LoanForm({ open, onOpenChange, editTarget }: {
 }) {
   const { create, update } = useLoanMutations();
   const isEditing = !!editTarget;
-  const { register, handleSubmit, watch, setValue, reset } = useForm<FormData>({
+  const { register, handleSubmit, watch, setValue, reset, formState } = useForm<FormData>({
     defaultValues: {
       direction: 'lend', counterparty: '', principal: '', date: dayjs().format('YYYY-MM-DD'), dueDate: '',
       rate: '0', periods: '', compound: false, method: 'balloon', firstRepayDate: '', repayDay: '', note: '',
@@ -112,7 +112,12 @@ export default function LoanForm({ open, onOpenChange, editTarget }: {
   const pending = isEditing ? update.isPending : create.isPending;
 
   return (
-    <Modal open={open} onClose={() => onOpenChange(false)} title={isEditing ? '编辑借贷' : '建立借贷'}>
+    <Modal open={open} onClose={() => onOpenChange(false)} title={isEditing ? '编辑借贷' : '建立借贷'} guard={{
+      // 未保存守卫：录到一半误按 Esc/✕ 时不直接关闭，先确认防输入丢失
+      dirty: formState.isDirty,
+      // 「保存并关闭」：触发校验+提交，成功后弹窗自行关闭
+      onSave: () => { void handleSubmit(onSubmit)(); },
+    }}>
       <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
         <div>
           <label className="mb-1 block text-sm text-muted">类型</label>

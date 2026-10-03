@@ -28,7 +28,7 @@ export default function HoldingsModal({ open, onOpenChange, account }: {
   const { data: holdings = [] } = useHoldings(account.id);
   const { data: summary } = useHoldingSummary(account.id);
   const { create, update, remove } = useHoldingMutations();
-  const { register, handleSubmit, reset, setValue } = useForm<FormData>({ defaultValues: EMPTY });
+  const { register, handleSubmit, reset, setValue, formState } = useForm<FormData>({ defaultValues: EMPTY });
   const [editingId, setEditingId] = useState<number | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Holding | null>(null);
 
@@ -92,7 +92,12 @@ export default function HoldingsModal({ open, onOpenChange, account }: {
   const totalAssets = account.balance + marketValue;
 
   return (
-    <Modal open={open} onClose={() => onOpenChange(false)} title={`持仓 · ${account.name}`} wide>
+    <Modal open={open} onClose={() => onOpenChange(false)} title={`持仓 · ${account.name}`} wide guard={{
+      // 未保存守卫：录到一半误按 Esc/✕ 时不直接关闭，先确认防输入丢失
+      dirty: formState.isDirty,
+      // 「保存并关闭」：触发校验+提交，成功后弹窗自行关闭
+      onSave: () => { void handleSubmit(onSubmit)(); },
+    }}>
       {/* 汇总：现金 / 市值 / 总资产 / 盈亏 */}
       <div className="mb-4 grid grid-cols-2 gap-3 rounded-xl border border-[var(--border)] bg-[var(--card)] p-4 text-sm lg:grid-cols-4">
         <div>

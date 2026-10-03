@@ -33,10 +33,10 @@ export default function SavingsPage() {
   const [batchBusy, setBatchBusy] = useState(false);
   const [accountId, setAccountId] = useState<number | undefined>();
   const [toAccountId, setToAccountId] = useState<number | undefined>();
-  const { register, handleSubmit, reset } = useForm<{ amount: string }>({ defaultValues: { amount: '' } });
+  const { register, handleSubmit, reset, formState } = useForm<{ amount: string }>({ defaultValues: { amount: '' } });
   const [withdrawGoal, setWithdrawGoal] = useState<SavingsGoal | null>(null);
   const [withdrawToId, setWithdrawToId] = useState<number | undefined>();
-  const { register: wRegister, handleSubmit: wHandleSubmit, reset: wReset } = useForm<{ amount: string }>({ defaultValues: { amount: '' } });
+  const { register: wRegister, handleSubmit: wHandleSubmit, reset: wReset, formState: wFormState } = useForm<{ amount: string }>({ defaultValues: { amount: '' } });
   // 目标归集账户集（来源从首个归集账户转出）
   const poolOf = (g: SavingsGoal) => (g.account_ids?.length ? g.account_ids : (g.account_id != null ? [g.account_id] : []));
   const withdrawPool = withdrawGoal ? poolOf(withdrawGoal) : [];
@@ -165,7 +165,12 @@ export default function SavingsPage() {
         </div>
       )}
       <GoalForm open={formOpen} onOpenChange={(v) => { setFormOpen(v); if (!v) setEditGoal(null); }} editTarget={editGoal} />
-      <Modal open={!!depositGoal} onClose={() => setDepositGoal(null)} title={depositGoal ? `存入「${depositGoal.name}」` : ''}>
+      <Modal open={!!depositGoal} onClose={() => setDepositGoal(null)} title={depositGoal ? `存入「${depositGoal.name}」` : ''} guard={{
+        // 未保存守卫：录到一半误按 Esc/✕ 时不直接关闭，先确认防输入丢失
+        dirty: formState.isDirty,
+        // 「保存并关闭」：触发校验+提交，成功后弹窗自行关闭
+        onSave: () => { void handleSubmit(onDeposit)(); },
+      }}>
         <form onSubmit={handleSubmit(onDeposit)} className="space-y-4">
           <div>
             <label className="mb-1 block text-sm text-muted">存入金额</label>
@@ -199,7 +204,12 @@ export default function SavingsPage() {
           <Button type="submit" className="w-full" disabled={deposit.isPending}>确认存入</Button>
         </form>
       </Modal>
-      <Modal open={!!withdrawGoal} onClose={() => setWithdrawGoal(null)} title={withdrawGoal ? `支取「${withdrawGoal.name}」` : ''}>
+      <Modal open={!!withdrawGoal} onClose={() => setWithdrawGoal(null)} title={withdrawGoal ? `支取「${withdrawGoal.name}」` : ''} guard={{
+        // 未保存守卫：录到一半误按 Esc/✕ 时不直接关闭，先确认防输入丢失
+        dirty: wFormState.isDirty,
+        // 「保存并关闭」：触发校验+提交，成功后弹窗自行关闭
+        onSave: () => { void wHandleSubmit(onWithdraw)(); },
+      }}>
         <form onSubmit={wHandleSubmit(onWithdraw)} className="space-y-4">
           <div className="rounded-lg border border-[var(--border)] px-3 py-2 text-sm bg-black/5 dark:bg-white/5">
             <div className="flex justify-between text-muted">

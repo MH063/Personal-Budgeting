@@ -55,6 +55,18 @@ fn get_migrations() -> Vec<Migration> {
             sql: include_str!("../migrations/008_prune_preset_accounts.sql"),
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 9,
+            description: "import_skips",
+            sql: include_str!("../migrations/009_import_skips.sql"),
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 10,
+            description: "dup_reviews",
+            sql: include_str!("../migrations/010_dup_reviews.sql"),
+            kind: MigrationKind::Up,
+        },
     ]
 }
 

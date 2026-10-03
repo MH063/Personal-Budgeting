@@ -30,7 +30,7 @@ export default function GoalForm({ open, onOpenChange, editTarget }: {
   const { create, update } = useGoalMutations();
   const { data: allAccounts = [] } = useAccounts(true);
   const isEditing = !!editTarget;
-  const { register, handleSubmit, setValue, watch, reset } = useForm<FormData>({
+  const { register, handleSubmit, setValue, watch, reset, formState } = useForm<FormData>({
     defaultValues: {
       name: '', targetAmount: '', accountIds: [], targetDate: dayjs().add(6, 'month').format('YYYY-MM-DD'),
       icon: '🎯', color: '#10B981', autoMonthly: '', autoDay: '1', note: '',
@@ -88,7 +88,12 @@ export default function GoalForm({ open, onOpenChange, editTarget }: {
   const pending = isEditing ? update.isPending : create.isPending;
 
   return (
-    <Modal open={open} onClose={() => onOpenChange(false)} title={isEditing ? '编辑储蓄目标' : '新建储蓄目标'}>
+    <Modal open={open} onClose={() => onOpenChange(false)} title={isEditing ? '编辑储蓄目标' : '新建储蓄目标'} guard={{
+      // 未保存守卫：录到一半误按 Esc/✕ 时不直接关闭，先确认防输入丢失
+      dirty: formState.isDirty,
+      // 「保存并关闭」：触发校验+提交，成功后弹窗自行关闭
+      onSave: () => { void handleSubmit(onSubmit)(); },
+    }}>
       <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
         <div>
           <label className="mb-1 block text-sm text-muted">目标名称</label>
