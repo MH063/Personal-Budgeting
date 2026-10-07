@@ -1,5 +1,4 @@
 import { getKV, setKV } from './kv';
-import { recordAudit } from './audit';
 
 /**
  * 商户标准化 + 用户规则优先级引擎（AI + 规则混合的可解释第一层）
@@ -107,22 +106,4 @@ export function categorizeByRule(text: string, ctx: NormContext = {}): { categor
 /** 查找某规则并返回其索引（用于 UI 编辑/删除），找不到返回 -1。 */
 export function findRuleIndex(rules: UserRule[], id: number): number {
   return id >= 0 && id < rules.length ? id : -1;
-}
-
-/**
- * 反馈闭环：用户纠正分类 → 把"文案 → 正确分类"回写为一条 categorize 自定义规则 + 记审计。
- * 幂等：若已存在相同(匹配词,分类)的启用规则则跳过。返回是否新增。
- */
-export async function learnCorrection(methodText: string, correctCategory: string): Promise<boolean> {
-  const match = String(methodText ?? '').trim();
-  const category = String(correctCategory ?? '').trim();
-  if (!match || !category) return false;
-  const rules = loadUserRules();
-  const exists = rules.some((r) => r.kind === 'categorize' && r.enabled && r.match === match && r.to === category);
-  if (!exists) {
-    saveUserRules([...rules, { kind: 'categorize', match, to: category, enabled: true }]);
-    await recordAudit({ kind: 'rule_learned', source: 'user', action: '回写自定义规则', before: null, after: `「${match}」→ ${category}`, basis: '用户纠正反馈', method: match });
-    return true;
-  }
-  return false;
 }

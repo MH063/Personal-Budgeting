@@ -5,13 +5,13 @@ import { Button } from '@/components/ui/button';
 import { Hint } from '@/components/ui/hint';
 import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
-import { loadUserRules, saveUserRules, parseUserRules, learnCorrection, type UserRule } from '@/api/merchantNorm';
+import { loadUserRules, saveUserRules, parseUserRules, type UserRule } from '@/api/merchantNorm';
 import { loadImportRules, parseImportRules, saveImportRules } from '@/api/importRules';
 import type { ImportRule } from '@/api/import';
-import { parseRulesDoc, buildRulesDocText, type DocRules } from '@/api/rulesDoc';
+import { parseRulesDoc, buildRulesDocText, buildRulesDocTemplate, mergeDocRules, type DocRules } from '@/api/rulesDoc';
 import { useKnowledgeStore, type KnowledgeEntry } from '@/stores/useKnowledgeStore';
 import { downloadJSON, saveJSON, downloadText, saveText } from '@/lib/export';
-import { queryAuditLogs, countAuditByKind, type AuditEntry } from '@/api/audit';
+import { queryAuditLogs, type AuditEntry } from '@/api/audit';
 import AuditHistoryDialog from '@/components/ai/AuditHistoryDialog';
 
 /**
@@ -24,14 +24,18 @@ import AuditHistoryDialog from '@/components/ai/AuditHistoryDialog';
  *    导入账单时完全不参与——同一意图「→分类」被拆成两条互不相通的路径。
  * 本次改造（方案已与用户确认）：
  *  1) 统一列表：四类规则汇成一个列表（汇总条数 + 类型筛选 + 统一搜索），
- *     行内直接启用/停用/编辑/删除，删除即实时生效（引擎读的就是这份存储）；
- *  2) 统一添加：一个表单 +「动作」四选一（归类 / 归并 / 资金流向 / AI 参考知识），
- *     选中后动态显示对应目标字段，用户无需理解各规则的存储差异；
+ *     行内直接启用/停用/删除，删除即实时生效（引擎读的就是这份存储）；
+ *  2) 建立入口唯一化（用户要求「只允许文件的导入，不允许系统中的建立」）：
+ *     页面不提供手动添加表单，规则统一「下载模板 → 填写 → 导入文档」；
+ *     模板 / 导入 / 导出共用同一格式契约（rulesDoc.ts 同一解析器），便于用户
+ *     设计规则与外部工具识别；同一匹配词再次导入按文档值更新内容（文档优先，
+ *     「改文档 → 重新导入」是修改规则的唯一途径，启用状态仍由列表内操作管理）；
  *  3) 语义打通：导入解析收尾时归类规则兜底生效（见 import.ts applyUserCategoryRules），
- *     「星巴克 => 咖啡」加一条处处生效；
- *  4) 文档式导入导出：规则可导出为人类可读清单（每行一条「匹配词 => 目标」），
- *     也可从 txt/md 批量导入；文档在导出那一刻按最新规则集生成——删除规则后
- *     再导出自动同步（文档不是独立数据源，不存在双源不一致）。
+ *     「星巴克 => 咖啡」导入一条处处生效；
+ *  4) 文档式导出：规则可导出为人类可读清单（每行一条「匹配词 => 目标」），
+ *     文档在导出那一刻按最新规则集生成——删除规则后再导出自动同步（文档不是独立数据源）。
+ * 保留的非「手动建立」通道：导入账单核对时的自动沉淀（AI 纠错闭环，见
+ * importRules.learnRuleFromCorrection）、JSON 备份包导入（换机迁移）——均非在列表中手动建规则。
  * 机制分层（合的是展示与入口，不是执行机制）：
  *  - 执行规则（归类 / 归并 / 资金流向）：本机存储、本地引擎执行、不消耗 AI；
  *    优先级：用户规则 > 内置同义 > 学习模型/AI 默认。
@@ -44,8 +48,6 @@ const RULES_BUNDLE_TYPE = 'moneybook-rules';
 
 /** 统一条目的四种类别（展示层合并；存储与执行机制各自独立） */
 type EntryKind = 'categorize' | 'merchant_renamed' | 'flow' | 'knowledge';
-/** 添加表单的「动作」：与条目类别一一对应 */
-type AddAction = EntryKind;
 
 /** 列表行类别标签 */
 const KIND_LABEL: Record<EntryKind, string> = {
@@ -55,22 +57,9 @@ const KIND_LABEL: Record<EntryKind, string> = {
   knowledge: 'AI 参考',
 };
 
-/** 资金流向类型选项（与导入可产生的交易类型一致，import.RULE_TYPES 口径） */
-const FLOW_TYPE_OPTIONS: { value: ImportRule['type']; label: string }[] = [
-  { value: 'expense', label: '支出' },
-  { value: 'income', label: '收入' },
-  { value: 'transfer', label: '转账' },
-  { value: 'repay_in', label: '负债减少' },
-];
+/** 资金流向类型的中文标签（列表展示用，口径与 import.RULE_TYPES 一致） */
 const FLOW_TYPE_LABEL: Record<ImportRule['type'], string> = {
   expense: '支出', income: '收入', transfer: '转账', repay_in: '负债减少',
-};
-
-/** 匹配词输入框占位文案（按动作区分，帮助用户理解匹配方式为「包含匹配」） */
-const MATCH_PLACEHOLDER: Record<Exclude<AddAction, 'knowledge'>, string> = {
-  categorize: '匹配词，如：星巴克',
-  merchant_renamed: '匹配词，如：金拱门',
-  flow: '匹配关键词，如：停车费',
 };
 
 /** 筛选下拉选项 */
@@ -149,38 +138,20 @@ export default function RuleManage() {
   const [flowRules, setFlowRules] = useState<ImportRule[]>(() => loadImportRules());
   const knowledgeEntries = useKnowledgeStore((s) => s.entries);
   const addKnowledge = useKnowledgeStore((s) => s.add);
-  const updateKnowledge = useKnowledgeStore((s) => s.update);
   const removeKnowledge = useKnowledgeStore((s) => s.remove);
 
   // —— 统一搜索 + 类型筛选 ——
   const [query, setQuery] = useState('');
   const [kindFilter, setKindFilter] = useState<'all' | EntryKind>('all');
 
-  // —— 添加表单（动作四选一，字段随动作动态显示） ——
-  const [action, setAction] = useState<AddAction>('categorize');
-  const [match, setMatch] = useState('');
-  const [to, setTo] = useState('');
-  const [flowType, setFlowType] = useState<ImportRule['type']>('expense');
-  const [flowAccount, setFlowAccount] = useState('');
-  const [flowToAccount, setFlowToAccount] = useState('');
-  const [flowCategory, setFlowCategory] = useState('');
-  const [kTitle, setKTitle] = useState('');
-  const [kContent, setKContent] = useState('');
+  // —— 知识文档导入（把资料文件导入为 AI 参考知识） ——
   const knowledgeDocRef = useRef<HTMLInputElement>(null);
   const [importingDocs, setImportingDocs] = useState(false);
 
-  // —— 知识条目行内编辑 ——
-  const [editKId, setEditKId] = useState<string | null>(null);
-  const [editKTitle, setEditKTitle] = useState('');
-  const [editKContent, setEditKContent] = useState('');
-
-  // —— 反馈学习与审计 ——
-  const [learnText, setLearnText] = useState('');
-  const [learnCat, setLearnCat] = useState('');
+  // —— 审计历史（AI / 规则修改留痕；含导入核对自动沉淀的记录） ——
   const [audit, setAudit] = useState<AuditEntry[]>([]);
   const [auditTotal, setAuditTotal] = useState(0);
   const [auditOpen, setAuditOpen] = useState(false);
-  const [correctionCount, setCorrectionCount] = useState(0);
 
   // —— 统一条目与总览统计 ——
   const entries = buildEntries(merchantRules, flowRules, knowledgeEntries);
@@ -212,65 +183,18 @@ export default function RuleManage() {
     setFlowRules(loadImportRules());
   };
 
-  /** 纠错回写：把「原文 + 正确分类」沉淀为归类规则并记审计（幂等） */
-  async function doLearn() {
-    const ok = await learnCorrection(learnText, learnCat);
-    toast.success(ok ? '已回写为自定义规则并记录审计' : '该规则已存在，未重复添加');
-    setLearnText('');
-    setLearnCat('');
-    setMerchantRules(loadUserRules());
-    void refreshAudit();
-  }
-
-  /** 刷新审计摘要（最近 5 条 + 总条数 + 纠错回写次数） */
+  /** 刷新审计摘要（最近 5 条 + 总条数；供审计区块与弹窗关闭后回读） */
   async function refreshAudit() {
     const { total, rows } = await queryAuditLogs({ limit: 5 });
     setAudit(rows);
     setAuditTotal(total);
-    setCorrectionCount(await countAuditByKind('rule_learned'));
   }
 
-  // 挂载时加载一次审计与纠正次数
+  // 挂载时加载一次审计摘要
   useEffect(() => {
     void refreshAudit();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  /** 添加规则：按当前动作路由到对应存储（知识条目无匹配词，走标题+内容） */
-  function addByAction() {
-    if (action === 'knowledge') {
-      if (!kTitle.trim() && !kContent.trim()) { toast.error('请输入标题或内容'); return; }
-      addKnowledge({ title: kTitle.trim() || '未命名知识', content: kContent.trim() });
-      setKTitle('');
-      setKContent('');
-      toast.success('已添加知识条目，写入后将随 AI 请求参与上下文');
-      return;
-    }
-    const m = match.trim();
-    if (!m) { toast.error('请填写匹配词'); return; }
-    if (action === 'flow') {
-      persistFlows([...flowRules, {
-        match: m,
-        type: flowType,
-        account: flowAccount.trim() || undefined,
-        toAccount: flowType === 'transfer' ? (flowToAccount.trim() || undefined) : undefined,
-        category: flowCategory.trim() || undefined,
-        enabled: true,
-      }]);
-      setMatch('');
-      setFlowAccount('');
-      setFlowToAccount('');
-      setFlowCategory('');
-      toast.success('资金流向规则已添加（下次选择文件解析时生效）');
-      return;
-    }
-    const t = to.trim();
-    if (!t) { toast.error('请填写目标'); return; }
-    persistMerchant([...merchantRules, { kind: action, match: m, to: t, enabled: true }]);
-    setMatch('');
-    setTo('');
-    toast.success('规则已添加');
-  }
 
   /** 行内启用/停用：按条目类别路由到对应存储（知识条目无启停概念，不显示入口） */
   function toggleEntry(e: RuleEntry) {
@@ -285,27 +209,11 @@ export default function RuleManage() {
   function removeEntry(e: RuleEntry) {
     if (e.kind === 'knowledge' && e.knowledge) {
       removeKnowledge(e.knowledge.id);
-      if (editKId === e.knowledge.id) setEditKId(null);
       toast.success('已删除该知识条目');
       return;
     }
     if (e.kind === 'flow') persistFlows(flowRules.filter((_, i) => i !== e.idx));
     else persistMerchant(merchantRules.filter((_, i) => i !== e.idx));
-  }
-
-  /** 进入知识条目的行内编辑 */
-  function startEditK(k: KnowledgeEntry) {
-    setEditKId(k.id);
-    setEditKTitle(k.title);
-    setEditKContent(k.content);
-  }
-
-  /** 保存知识条目行内编辑 */
-  function saveEditK() {
-    if (editKId === null) return;
-    updateKnowledge(editKId, { title: editKTitle.trim() || '未命名知识', content: editKContent.trim() });
-    setEditKId(null);
-    toast.success('已保存知识条目');
   }
 
   /**
@@ -474,37 +382,25 @@ export default function RuleManage() {
     }
   }
 
-  /** 合并文档解析结果到各存储（去重、不覆盖；键与备份包导入同口径）；返回新增总数 */
-  function applyDocRules(doc: DocRules): number {
-    // 归类 + 归并 → kv.merchantRules（键 kind+match+to）
-    const mergedM = [...loadUserRules()];
-    let addM = 0;
-    for (const r of doc.categorize) {
-      if (!mergedM.some((x) => x.kind === 'categorize' && x.match === r.match && x.to === r.to)) {
-        mergedM.push({ kind: 'categorize', match: r.match, to: r.to, enabled: true });
-        addM++;
-      }
+  /**
+   * 合并文档解析结果到各存储（文档优先：同匹配词按文档值更新内容、保留启用状态，
+   * 合并逻辑见 rulesDoc.mergeDocRules——「改文档 → 重新导入」是修改规则的唯一途径）。
+   * @returns 新增 / 更新条数（供成功提示）
+   */
+  function applyDocRules(doc: DocRules): { added: number; updated: number } {
+    const merged = mergeDocRules(loadUserRules(), loadImportRules(), doc);
+    if (merged.added || merged.updated) {
+      persistMerchant(merged.merchant);
+      persistFlows(merged.flow);
     }
-    for (const r of doc.merchant) {
-      if (!mergedM.some((x) => x.kind === 'merchant_renamed' && x.match === r.match && x.to === r.to)) {
-        mergedM.push({ kind: 'merchant_renamed', match: r.match, to: r.to, enabled: true });
-        addM++;
-      }
-    }
-    if (addM) persistMerchant(mergedM);
-    // 资金流向 → kv.importRules（键 match）
-    const mergedI = [...loadImportRules()];
-    let addI = 0;
-    for (const r of doc.flow) {
-      if (!mergedI.some((x) => x.match === r.match)) { mergedI.push(r); addI++; }
-    }
-    if (addI) persistFlows(mergedI);
-    return addM + addI;
+    return { added: merged.added, updated: merged.updated };
   }
 
   /**
-   * 从文档导入规则（txt/md 每行一条，如「星巴克 => 咖啡」；桌面系统对话框 / 浏览器文件选择）。
-   * 无法解析的行不阻断导入，仅汇总提示用户核对（解析规则见 rulesDoc.parseRulesDoc）。
+   * 从文档导入规则（建立规则与修改规则的唯一入口：模板 → 填写 → 导入）。
+   * txt/md 每行一条（如「星巴克 => 咖啡」）；桌面系统对话框 / 浏览器文件选择。
+   * 同一匹配词按文档值更新内容（文档优先）；无法解析的行不阻断导入，仅汇总提示核对
+   * （解析规则见 rulesDoc.parseRulesDoc）。
    */
   async function handleImportDoc() {
     try {
@@ -519,20 +415,36 @@ export default function RuleManage() {
         text = await pickTextFile('.txt,.md,.markdown,text/plain');
       }
       const doc = parseRulesDoc(text);
-      const added = applyDocRules(doc);
-      console.log('[规则文档导入] 新增条数：', added, '；无法解析行：', doc.invalid.length);
+      const { added, updated } = applyDocRules(doc);
+      console.log('[规则文档导入] 新增：', added, '；更新：', updated, '；无法解析行：', doc.invalid.length);
       if (doc.invalid.length) console.warn('[规则文档导入] 无法解析的行（已忽略）：', doc.invalid);
-      if (!added && !doc.invalid.length) { toast.success('没有新增规则（可能已全部存在）'); return; }
+      if (!added && !updated && !doc.invalid.length) { toast.success('规则已与文档一致，无变化'); return; }
       toast.success(
-        `已导入 ${added} 条规则（重复项已自动跳过）${doc.invalid.length ? `；${doc.invalid.length} 行无法解析已忽略` : ''}`
+        `已导入 ${added} 条、更新 ${updated} 条（同一匹配词按文档覆盖）${doc.invalid.length ? `；${doc.invalid.length} 行无法解析已忽略` : ''}`
       );
     } catch (e) {
       toast.error(`导入文档失败：${(e as Error).message}`);
     }
   }
 
-  const textareaCls =
-    'w-full rounded-md border border-[var(--border)] bg-[var(--bg)] px-2.5 py-1.5 text-sm outline-none focus:border-[var(--color-primary)]';
+  /** 下载规则文档模板（建立规则的起点：模板含三类格式示例，示例均为注释行，直接导入不会新增规则） */
+  async function handleDownloadTemplate() {
+    try {
+      const text = buildRulesDocTemplate();
+      const filename = '规则文档模板.md';
+      console.log('[规则模板] 生成模板字符数：', text.length);
+      if (isTauriEnv()) {
+        const dest = await saveText(filename, text);
+        if (!dest) return; // 用户取消保存对话框
+        toast.success(`模板已保存：${dest}`);
+        return;
+      }
+      downloadText(filename, text);
+      toast.success('模板已下载，按格式填写后点「导入文档」');
+    } catch (e) {
+      toast.error(`下载模板失败：${(e as Error).message}`);
+    }
+  }
 
   return (
     <div className="space-y-4">
@@ -543,10 +455,11 @@ export default function RuleManage() {
         </h2>
         <p className="text-xs text-muted">
           四类规则统一列表展示；执行规则命中本地引擎、不消耗 AI，AI 参考知识只发送给 AI 不做本地执行。
+          规则统一通过文档导入建立（下载模板 → 填写 → 导入），行内可停用 / 删除，删除即实时生效。
         </p>
       </div>
 
-      {/* 工具栏：统一搜索 + 总览统计 + 备份/文档 双通道导入导出 */}
+      {/* 工具栏：统一搜索 + 总览统计 + 文档/备份 双通道导入导出 */}
       <div className="flex flex-wrap items-center gap-3 rounded-xl border border-[var(--border)] bg-[var(--card)] px-4 py-3">
         <Input
           placeholder="搜索全部规则（关键词 / 目标）…"
@@ -558,102 +471,56 @@ export default function RuleManage() {
           共 {entries.length} 条：归类 {catCount} · 归并 {renCount} · 资金流向 {flowRules.length} · 参考知识 {knowledgeEntries.length}
         </span>
         <div className="ml-auto flex flex-wrap gap-2">
-          <Button variant="outline" size="sm" onClick={() => void handleImportRules()}>导入备份</Button>
-          <Button variant="outline" size="sm" onClick={() => void handleExportRules()}>导出备份</Button>
+          <Button variant="outline" size="sm" onClick={() => void handleDownloadTemplate()}>下载模板</Button>
           <Button variant="outline" size="sm" onClick={() => void handleImportDoc()}>导入文档</Button>
           <Button variant="outline" size="sm" onClick={() => void handleExportDoc()}>导出文档</Button>
+          <Button variant="outline" size="sm" onClick={() => void handleImportRules()}>导入备份</Button>
+          <Button variant="outline" size="sm" onClick={() => void handleExportRules()}>导出备份</Button>
         </div>
       </div>
 
-      {/* 统一添加表单：动作四选一，目标字段随动作动态显示 */}
+      {/* 规则文档导入说明（建立规则唯一入口：下载模板 → 填写 → 导入；应用内不提供手动添加表单） */}
       <div className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-4">
-        <h3 className="mb-1 text-sm font-medium">＋ 添加规则</h3>
+        <h3 className="mb-1 text-sm font-medium">规则文档导入</h3>
         <p className="mb-3 text-xs text-muted">
-          选择一种动作录入；执行规则（归类 / 归并 / 资金流向）本地即时生效、不消耗 AI；AI 参考知识随请求发送给当前服务商。
-          也可用右上角「导入文档」批量录入（每行一条）：匹配词 =&gt; 分类（归类）；「归并: 匹配词 =&gt; 商户名」；「流向: 关键词 =&gt; 类型|分类|账户|转入账户」（可先「导出文档」参考示例格式）。
+          规则统一通过文档导入建立（应用内不提供手动添加）：点右上角「下载模板」，按格式填写后用「导入文档」选择文件即可。
+          每行一条规则，# 注释与空行自动跳过；同一匹配词再次导入会按文档更新内容（修改规则同样是改文档后重新导入）。
         </p>
-        <div className="flex flex-wrap items-center gap-2">
-          <Select
-            value={action}
-            onChange={(v) => setAction(v as AddAction)}
-            options={[
-              { value: 'categorize', label: '归类到分类（文本→分类）' },
-              { value: 'merchant_renamed', label: '归并到商户（文本→规范名）' },
-              { value: 'flow', label: '资金流向判定（导入时指定类型/账户）' },
-              { value: 'knowledge', label: 'AI 参考知识（随请求发送）' },
-            ]}
-            placeholder="动作"
-          />
-          {action !== 'knowledge' && (
-            <Input
-              placeholder={MATCH_PLACEHOLDER[action]}
-              value={match}
-              onChange={(e) => setMatch(e.target.value)}
-              className="max-w-[200px]"
-            />
-          )}
-          {action === 'categorize' && (
-            <Input placeholder="目标分类，如：咖啡" value={to} onChange={(e) => setTo(e.target.value)} className="max-w-[180px]" />
-          )}
-          {action === 'merchant_renamed' && (
-            <Input placeholder="规范商户名，如：麦记" value={to} onChange={(e) => setTo(e.target.value)} className="max-w-[180px]" />
-          )}
-          {action === 'flow' && (
-            <>
-              <Select
-                value={flowType}
-                onChange={(v) => setFlowType(v as ImportRule['type'])}
-                options={FLOW_TYPE_OPTIONS}
-                placeholder="类型"
-              />
-              <Input placeholder="账户（可空）" value={flowAccount} onChange={(e) => setFlowAccount(e.target.value)} className="max-w-[130px]" />
-              {flowType === 'transfer' && (
-                <Input placeholder="转入账户" value={flowToAccount} onChange={(e) => setFlowToAccount(e.target.value)} className="max-w-[130px]" />
-              )}
-              <Input placeholder="分类（可空）" value={flowCategory} onChange={(e) => setFlowCategory(e.target.value)} className="max-w-[120px]" />
-            </>
-          )}
-          <Button size="sm" onClick={addByAction}>添加</Button>
-          {action === 'knowledge' && (
-            <>
-              <input
-                ref={knowledgeDocRef}
-                type="file"
-                hidden
-                multiple
-                accept=".txt,.md,.markdown,.csv,.json,.log,.yaml,.yml,.ini"
-                onChange={(e) => void onImportKnowledgeDocs(e)}
-              />
-              <Button size="sm" variant="outline" onClick={() => knowledgeDocRef.current?.click()} disabled={importingDocs}>
-                {importingDocs ? '导入中…' : '从文件导入知识'}
-              </Button>
-            </>
-          )}
-        </div>
-        {action === 'knowledge' && (
-          <div className="mt-2 space-y-2">
-            <Input
-              value={kTitle}
-              onChange={(e) => setKTitle(e.target.value)}
-              placeholder="标题（例：预算规则、记账偏好）"
-            />
-            <textarea
-              rows={2}
-              value={kContent}
-              onChange={(e) => setKContent(e.target.value)}
-              placeholder="知识 / 规则内容…"
-              className={textareaCls}
-            />
+        <div className="mb-3 space-y-1 rounded-md border border-[var(--border)] bg-black/2 px-3 py-2 text-xs dark:bg-white/5">
+          <div>
+            <span className="text-muted">归类：</span>星巴克 =&gt; 咖啡
           </div>
-        )}
+          <div>
+            <span className="text-muted">归并：</span>归并: 金拱门 =&gt; 麦当劳
+          </div>
+          <div>
+            <span className="text-muted">流向：</span>流向: 停车费 =&gt; 支出|交通|支付宝
+            <span className="ml-1 text-muted">（类型|分类|账户|转入账户，后三项可省略）</span>
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-2 border-t border-[var(--border)] pt-3">
+          <span className="text-xs font-medium">AI 参考知识：</span>
+          <input
+            ref={knowledgeDocRef}
+            type="file"
+            hidden
+            multiple
+            accept=".txt,.md,.markdown,.csv,.json,.log,.yaml,.yml,.ini"
+            onChange={(e) => void onImportKnowledgeDocs(e)}
+          />
+          <Button size="sm" variant="outline" onClick={() => knowledgeDocRef.current?.click()} disabled={importingDocs}>
+            {importingDocs ? '导入中…' : '从文件导入知识'}
+          </Button>
+          <span className="text-xs text-muted">把资料文件（txt / md 等）导入为参考知识，随 AI 请求发送、不做本地执行。</span>
+        </div>
       </div>
 
-      {/* 统一规则列表：类型筛选 + 搜索联动；行内启用/停用/编辑/删除 */}
+      {/* 统一规则列表：类型筛选 + 搜索联动；行内启用/停用/删除 */}
       <div className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-4">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-1.5 text-sm font-semibold">
             规则列表（{visible.length} / {entries.length} 条）
-            <Hint text="四类规则统一展示：归类 / 归并 / 资金流向为本地执行规则（命中即生效、不消耗 AI）；AI 参考知识随请求发送给服务商。行内可直接停用 / 编辑 / 删除；删除后立即生效，导出文档与备份在生成时自动同步。" />
+            <Hint text="四类规则统一展示：归类 / 归并 / 资金流向为本地执行规则（命中即生效、不消耗 AI）；AI 参考知识随请求发送给服务商。行内可直接停用 / 删除；删除后立即生效，导出文档与备份在生成时自动同步。" />
           </div>
           <Select
             value={kindFilter}
@@ -663,95 +530,62 @@ export default function RuleManage() {
           />
         </div>
         {entries.length === 0 ? (
-          <p className="px-4 py-6 text-center text-sm text-muted">暂无规则。可在上方选择动作添加，或用「导入文档」批量录入。</p>
+          <p className="px-4 py-6 text-center text-sm text-muted">暂无规则。点上方「下载模板」按格式填写，再用「导入文档」建立。</p>
         ) : visible.length === 0 ? (
           <p className="px-4 py-6 text-center text-sm text-muted">
             没有匹配{query.trim() ? `「${query.trim()}」` : '当前筛选'}的规则。
           </p>
         ) : (
           <div className="rounded-lg border border-[var(--border)]">
-            {visible.map((e) =>
-              e.kind === 'knowledge' && e.knowledge && editKId === e.knowledge.id ? (
-                // 知识条目行内编辑（标题 + 内容），保存后面板即时刷新
-                <div key={e.key} className="space-y-2 border-b border-[var(--border)] px-4 py-3 last:border-0">
-                  <Input value={editKTitle} onChange={(ev) => setEditKTitle(ev.target.value)} placeholder="标题" />
-                  <textarea
-                    rows={3}
-                    value={editKContent}
-                    onChange={(ev) => setEditKContent(ev.target.value)}
-                    className={textareaCls}
-                    placeholder="内容…"
-                  />
-                  <div className="flex justify-end gap-2">
-                    <Button size="sm" variant="outline" onClick={() => setEditKId(null)}>取消</Button>
-                    <Button size="sm" onClick={saveEditK}>保存</Button>
-                  </div>
-                </div>
-              ) : (
-                <div key={e.key} className="flex items-center justify-between gap-2 border-b border-[var(--border)] px-4 py-2.5 text-sm last:border-0">
-                  <div className="min-w-0 flex-1 truncate">
-                    <span className="rounded bg-black/5 px-1.5 py-0.5 text-[10px] font-medium dark:bg-white/10">
-                      {KIND_LABEL[e.kind]}
+            {visible.map((e) => (
+              <div key={e.key} className="flex items-center justify-between gap-2 border-b border-[var(--border)] px-4 py-2.5 text-sm last:border-0">
+                <div className="min-w-0 flex-1 truncate">
+                  <span className="rounded bg-black/5 px-1.5 py-0.5 text-[10px] font-medium dark:bg-white/10">
+                    {KIND_LABEL[e.kind]}
+                  </span>
+                  {e.kind === 'knowledge' ? (
+                    <span className="ml-2">
+                      <span className="font-medium">{e.knowledge?.title}</span>
+                      <span className="ml-2 text-muted">{e.knowledge?.content}</span>
                     </span>
-                    {e.kind === 'knowledge' ? (
-                      <span className="ml-2">
-                        <span className="font-medium">{e.knowledge?.title}</span>
-                        <span className="ml-2 text-muted">{e.knowledge?.content}</span>
-                      </span>
-                    ) : e.kind === 'flow' && e.rule ? (
-                      <span className="ml-2">{e.match} → {flowDesc(e.rule)}</span>
-                    ) : (
-                      <span className="ml-2">{e.match} → {e.to}</span>
-                    )}
-                    {!e.enabled && <span className="ml-2 text-xs text-muted">（停用）</span>}
-                  </div>
-                  <div className="flex shrink-0 gap-2">
-                    {e.kind !== 'knowledge' && (
-                      <button type="button" onClick={() => toggleEntry(e)} className="text-xs text-muted hover:underline">
-                        {e.enabled ? '停用' : '启用'}
-                      </button>
-                    )}
-                    {e.kind === 'knowledge' && e.knowledge && (
-                      <button type="button" onClick={() => startEditK(e.knowledge!)} className="text-xs text-muted hover:underline">
-                        编辑
-                      </button>
-                    )}
-                    <button type="button" onClick={() => removeEntry(e)} className="text-xs text-[var(--color-danger)] hover:underline">
-                      删除
-                    </button>
-                  </div>
+                  ) : e.kind === 'flow' && e.rule ? (
+                    <span className="ml-2">{e.match} → {flowDesc(e.rule)}</span>
+                  ) : (
+                    <span className="ml-2">{e.match} → {e.to}</span>
+                  )}
+                  {!e.enabled && <span className="ml-2 text-xs text-muted">（停用）</span>}
                 </div>
-              )
-            )}
+                <div className="flex shrink-0 gap-2">
+                  {e.kind !== 'knowledge' && (
+                    <button type="button" onClick={() => toggleEntry(e)} className="text-xs text-muted hover:underline">
+                      {e.enabled ? '停用' : '启用'}
+                    </button>
+                  )}
+                  <button type="button" onClick={() => removeEntry(e)} className="text-xs text-[var(--color-danger)] hover:underline">
+                    删除
+                  </button>
+                </div>
+              </div>
+            ))}
           </div>
         )}
       </div>
 
-      {/* —— 反馈学习（纠正回写） —— */}
+      {/* —— 审计历史（AI / 规则修改留痕；手动回写入口已随「规则只允许文件导入」移除，此处保留自动沉淀记录） —— */}
       <div className="rounded-lg border border-[var(--border)] p-3">
-        <h3 className="mb-1 text-sm font-medium">🔁 反馈学习</h3>
-        <p className="mb-2 text-xs text-muted">AI/规则判错时，纠正它：输入"原文 + 正确分类"，一键回写为自定义归类规则并记审计。</p>
-        <div className="mb-2 flex items-center gap-2">
-          <Input placeholder="原文，如：星巴克拿铁" value={learnText} onChange={(e) => setLearnText(e.target.value)} className="max-w-[220px]" />
-          <Input placeholder="正确分类，如：咖啡" value={learnCat} onChange={(e) => setLearnCat(e.target.value)} className="max-w-[160px]" />
-          <Button size="sm" disabled={!learnText.trim() || !learnCat.trim()} onClick={() => void doLearn()}>加入规则并记录</Button>
-        </div>
-        <div className="mb-2 rounded-md border border-[var(--border)] bg-black/2 px-2 py-1 text-xs text-muted dark:bg-white/5">
-          已通过纠错回写 {correctionCount} 条规则 · 规则优先级：用户规则 &gt; 内置同义 &gt; AI/默认
-        </div>
-        <div className="mt-3 flex items-center justify-between">
-          <h4 className="text-xs font-medium text-muted">
+        <div className="flex items-center justify-between">
+          <h3 className="text-sm font-medium">
             审计历史（AI/规则修改留痕{auditTotal > 0 ? ` · 共 ${auditTotal} 条` : ''}）
-          </h4>
+          </h3>
           <div className="flex gap-2">
             <Button variant="outline" size="sm" onClick={() => void refreshAudit()}>刷新</Button>
             <Button variant="outline" size="sm" onClick={() => setAuditOpen(true)}>查看审计历史</Button>
           </div>
         </div>
         {audit.length === 0 ? (
-          <p className="mt-1 text-xs text-muted">暂无审计记录。</p>
+          <p className="mt-2 text-xs text-muted">暂无审计记录。</p>
         ) : (
-          <ul className="mt-1 space-y-1 text-xs">
+          <ul className="mt-2 space-y-1 text-xs">
             {audit.map((a) => (
               <li key={a.id} className="truncate rounded border border-[var(--border)] px-2 py-1.5">
                 <span className="text-muted">{a.created_at} [{a.source}]</span> {a.action} · {a.after || '-'}

@@ -17,6 +17,12 @@ import type { UserRule } from './merchantNorm';
  *   流向: 停车费 => 支出|交通|支付宝           资金流向判定：类型|分类|账户|转入账户（尾部可省略、中间空位留空占位）
  * 分隔符支持 `=>`、`->`、`→`、`⇒`；前缀「归类 / 归并 / 流向」必须带冒号（中英文均可，无前缀默认归类）。
  * 流向字段竖线兼容全角「｜」；解析失败的行不报错终止，而是收集到 invalid 供界面提示用户核对。
+ *
+ * 模板与合并（用户要求「规则只允许文件导入建立，并给出正式格式文档模板」）：
+ *  - buildRulesDocTemplate：生成可下载的格式模板（示例均为注释行，直接导入 0 条规则、绝不误伤）；
+ *  - mergeDocRules：按「文档优先」合并（同匹配词更新内容、保留启用/停用状态），
+ *    使「改文档 → 重新导入」成为修改规则的唯一途径——模板 / 导入 / 导出共用同一格式契约，
+ *    便于用户设计与外部工具识别。
  */
 
 /** 文档解析结果：三类执行规则 + 无法解析的行 */
@@ -131,4 +137,110 @@ export function buildRulesDocText(merchantRules: UserRule[], flowRules: ImportRu
   for (const r of flows) lines.push(`流向: ${r.match} => ${flowToDocTarget(r)}`);
   lines.push('');
   return lines.join('\n');
+}
+
+/**
+ * 生成规则文档模板（「下载模板」用；文件名「规则文档模板.md」）。
+ * 设计（用户要求「正确的格式文档模板，便于用户设计以及后期工具的识别」）：
+ *  - 模板即格式契约：模板本身被 parseRulesDoc 解析为 0 条规则且 invalid 为空——
+ *    示例均为行首 # 注释行，用户未修改直接导入不会产生任何规则（防误伤）；
+ *  - 用户复制示例行、去掉行首 # 即生效（与「导出文档」共用同一格式，三处互认）；
+ *  - 三类规则各给示例：归类（无前缀）/ 归并（前缀「归并:」）/ 流向（前缀「流向:」）。
+ */
+export function buildRulesDocTemplate(): string {
+  return [
+    '# 记账规则文档模板（MoneyBook）',
+    '# ------------------------------------------------------------------',
+    '# 使用步骤：',
+    '#  1. 复制本文件到任意位置，按下方格式填写你的规则（每行一条）；',
+    '#  2. 打开应用「设置 → 智能规则」，点「导入文档」选择本文件；',
+    '#  3. 空行与 # 开头的行会被自动跳过；同一匹配词再次导入会按本文件更新；',
+    '#  4. 本模板未修改时直接导入不会新增任何规则（示例均为注释行）。',
+    '#',
+    '# 匹配词与目标之间的分隔符：=> 或 -> 或 → 或 ⇒',
+    '#',
+    '# ① 归类规则 —— 匹配文本包含关键词 → 归到分类（无需前缀）',
+    '#    示例（去掉行首 # 后生效）：',
+    '# 星巴克 => 咖啡',
+    '# 麦当劳 => 餐饮',
+    '#',
+    '# ② 商户归并 —— 命中文本 → 归并为规范商户名（前缀「归并:」）',
+    '#    示例（去掉行首 # 后生效）：',
+    '# 归并: 金拱门 => 麦当劳',
+    '#',
+    '# ③ 资金流向判定 —— 导入账单时命中关键词 → 指定类型/分类/账户（前缀「流向:」）',
+    '#    目标格式：类型|分类|账户|转入账户（后三项可省略；中间空位需留空占位，如 支出||支付宝）',
+    '#    类型取值：收入 / 支出 / 转账 / 负债减少',
+    '#    示例（去掉行首 # 后生效）：',
+    '# 流向: 停车费 => 支出|交通|支付宝',
+    '# 流向: 工资 => 收入',
+    '# 流向: 归还信用卡 => 转账|还款|支付宝|招商银行信用卡',
+    '#',
+    '# —— 在下方填写你的规则 ——',
+    '',
+  ].join('\n');
+}
+
+/** 文档合并结果（mergeDocRules 返回）：更新后的规则全量数组 + 新增 / 更新计数 */
+export interface DocMergeResult {
+  /** 更新后的归类 / 归并规则全量数组（调用方负责持久化） */
+  merchant: UserRule[];
+  /** 更新后的资金流向规则全量数组（调用方负责持久化） */
+  flow: ImportRule[];
+  /** 新增条数（文档里有、存储里没有的） */
+  added: number;
+  /** 更新条数（匹配词命中且内容有变化） */
+  updated: number;
+}
+
+/**
+ * 把文档解析结果合并进现有规则（用户确认的「文档优先」语义：改文档 → 重新导入是修改规则的唯一途径）。
+ *  - 同一匹配词（归类 / 归并按 kind+match，流向按 match）再次导入 → 按文档值更新内容；
+ *  - 不存在的 → 新增（默认启用）；
+ *  - 启用状态不随文档变化：文档不含停用信息，停用 / 启用是列表内的显式操作，
+ *    反复导入同一文档保持幂等，不会把用户停用的规则意外复活；
+ *  - 内容一致的重复导入不计入 updated（避免提示虚报「更新 N 条」）。
+ */
+export function mergeDocRules(merchant: UserRule[], flow: ImportRule[], doc: DocRules): DocMergeResult {
+  const m = [...merchant];
+  const f = [...flow];
+  let added = 0;
+  let updated = 0;
+
+  /** 归类 / 归并 upsert：同 kind+match 更新 to；否则追加（新增默认启用） */
+  const upsertMerchant = (kind: UserRule['kind'], match: string, to: string) => {
+    const i = m.findIndex((r) => r.kind === kind && r.match === match);
+    if (i < 0) {
+      m.push({ kind, match, to, enabled: true });
+      added++;
+      return;
+    }
+    if (m[i].to !== to) {
+      m[i] = { ...m[i], to };
+      updated++;
+    }
+  };
+  for (const r of doc.categorize) upsertMerchant('categorize', r.match, r.to);
+  for (const r of doc.merchant) upsertMerchant('merchant_renamed', r.match, r.to);
+
+  /** 资金流向 upsert：同 match 覆盖类型 / 分类 / 账户 / 转入账户；保留既有启用状态 */
+  for (const r of doc.flow) {
+    const i = f.findIndex((x) => x.match === r.match);
+    if (i < 0) {
+      f.push(r);
+      added++;
+      continue;
+    }
+    const old = f[i];
+    const same =
+      old.type === r.type &&
+      (old.category ?? '') === (r.category ?? '') &&
+      (old.account ?? '') === (r.account ?? '') &&
+      (old.toAccount ?? '') === (r.toAccount ?? '');
+    if (!same) {
+      f[i] = { ...old, type: r.type, category: r.category, account: r.account, toAccount: r.toAccount };
+      updated++;
+    }
+  }
+  return { merchant: m, flow: f, added, updated };
 }
