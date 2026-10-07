@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { toast } from 'sonner';
 import { loadImportRules, saveImportRules } from '@/api/importRules';
 import type { ImportRule } from '@/api/import';
@@ -24,11 +24,29 @@ const TYPE_OPTIONS: { value: ImportRule['type']; label: string }[] = [
   { value: 'repay_in', label: '负债减少' },
 ];
 
+interface Props {
+  /** 统一搜索关键字（父级智能规则页下发；空则显示全部），匹配关键词/账户/转入/分类 */
+  filter?: string;
+  /** 规则集变化回调：供父级「规则总览」统计条数（实时跟随本面板列表） */
+  onRulesChange?: (rules: ImportRule[]) => void;
+}
+
 const inputCls =
   'h-7 rounded border border-[var(--border)] bg-[var(--bg)] px-1 text-xs';
 
-export default function ImportRulesPanel() {
+export default function ImportRulesPanel({ filter = '', onRulesChange }: Props) {
   const [rules, setRules] = useState<ImportRule[]>(() => loadImportRules());
+
+  // 向父级上报最新规则集（总览条数实时跟随；编辑中的临时改动也计入当前列表）
+  useEffect(() => {
+    onRulesChange?.(rules);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rules]);
+
+  /** 统一搜索命中判定：关键词/账户/转入账户/分类任一包含即命中（忽略大小写） */
+  const q = filter.trim().toLowerCase();
+  const hit = (s?: string) => !q || String(s ?? '').toLowerCase().includes(q);
+  const visible = rules.map((r, i) => ({ r, i })).filter(({ r }) => hit(r.match) || hit(r.account) || hit(r.toAccount) || hit(r.category));
 
   /** 新增一条空白规则（默认支出，关键词留空待填） */
   function addRule() {
@@ -63,8 +81,9 @@ export default function ImportRulesPanel() {
         在导入预览里修正行的类型/账户/分类并导入，或在「导入后待核对」保存修正后，会自动沉淀为规则（幂等合并；已停用的规则不会被自动覆盖）。
       </p>
       {rules.length === 0 && <div className="mb-2 text-xs text-muted">暂无规则，点「添加规则」新建。</div>}
+      {rules.length > 0 && visible.length === 0 && <div className="mb-2 text-xs text-muted">没有匹配「{filter.trim()}」的规则。</div>}
       <div className="space-y-2">
-        {rules.map((r, i) => (
+        {visible.map(({ r, i }) => (
           <div key={i} className="flex flex-wrap items-center gap-1.5 text-xs">
             <input value={r.match} onChange={(e) => patchRule(i, { match: e.target.value })} placeholder="关键词"
               className={`${inputCls} w-28`} />

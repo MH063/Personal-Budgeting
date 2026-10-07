@@ -13,7 +13,12 @@ import { Input } from '@/components/ui/input';
  * 录入方式：① 手动添加/编辑文本条目；② 导入本地文档（txt / md / csv 等纯文本文件）。
  * 注入逻辑在 llm.ts 的 knowledgeBlock()，与凭证服务商无关，与页面挂载位置无关。
  */
-export default function KnowledgePanel() {
+interface Props {
+  /** 统一搜索关键字（父级智能规则页下发；空则显示全部），匹配标题/内容 */
+  filter?: string;
+}
+
+export default function KnowledgePanel({ filter = '' }: Props) {
   const entries = useKnowledgeStore((s) => s.entries);
   const add = useKnowledgeStore((s) => s.add);
   const update = useKnowledgeStore((s) => s.update);
@@ -106,6 +111,10 @@ export default function KnowledgePanel() {
   const textareaCls =
     'w-full rounded-md border border-[var(--border)] bg-[var(--bg)] px-2.5 py-1.5 text-sm outline-none focus:border-[var(--color-primary)]';
 
+  // 统一搜索：标题/内容任一包含关键字即命中（忽略大小写）
+  const q = filter.trim().toLowerCase();
+  const visible = entries.filter((e) => !q || e.title.toLowerCase().includes(q) || e.content.toLowerCase().includes(q));
+
   return (
     <div className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-4">
       <div className="mb-3 flex items-start justify-between gap-3">
@@ -150,9 +159,11 @@ export default function KnowledgePanel() {
       <div className="mt-3">
         {entries.length === 0 ? (
           <p className="py-3 text-center text-xs text-muted">暂无知识条目。可添加如「每月 20 号为房租扣款」「餐饮占比超 30% 需预警」等规则。</p>
+        ) : visible.length === 0 ? (
+          <p className="py-3 text-center text-xs text-muted">没有匹配「{filter.trim()}」的知识条目。</p>
         ) : (
           <ul className="divide-y divide-[var(--border)]">
-            {entries.map((e) => (
+            {visible.map((e) => (
               <li key={e.id} className="py-2">
                 {editingId === e.id ? (
                   <div className="space-y-2">
