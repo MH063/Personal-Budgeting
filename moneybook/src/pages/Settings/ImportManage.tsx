@@ -744,7 +744,7 @@ export default function ImportManage() {
         {/* 资金流向判定规则的编辑已集中到「智能规则」页：本页仅保留跳转入口，避免规则分散（用户要求） */}
         <div className="mt-3 rounded-lg border border-[var(--border)] p-2 text-xs text-muted">
           资金流向判定规则已集中到
-          <Link to="/settings?tab=rules" className="mx-1 text-[var(--color-primary)] hover:underline">设置 → 智能规则</Link>
+          <Link to="/settings?tab=rules" className="mx-1 text-[var(--color-primary-fg)] hover:underline">设置 → 智能规则</Link>
           统一管理（含归类规则、商户归并与参考知识）；在本页预览/核对中修正归类仍会自动沉淀规则。
         </div>
         {/* 列映射预览：自定义模板/单文件时可手动指认表头列到业务字段 */}

@@ -3,7 +3,7 @@
  * 覆盖：内置同义归一、用户规则优先于内置、分类规则命中、规则解析与过滤。
  */
 import { describe, it, expect } from 'vitest';
-import { normalizeMerchant, categorizeByRule, parseUserRules, type UserRule } from './merchantNorm';
+import { normalizeMerchant, categorizeByRule, parseUserRules, loadUserRules, saveUserRules, type UserRule } from './merchantNorm';
 
 const rules: UserRule[] = [
   { kind: 'merchant_renamed', match: '麦当劳', to: '麦记', enabled: true },
@@ -52,5 +52,26 @@ describe('parseUserRules：校验与过滤', () => {
   });
   it('非数组返回空', () => {
     expect(parseUserRules('x')).toEqual([]);
+  });
+});
+
+/**
+ * 防回归：历史缺陷为 loadUserRules 直接 `parseUserRules(getKV(...))`——getKV 返回 JSON
+ * 字符串而非数组，导致读回恒为空（界面上「添加规则后列表不出现、统计恒为 0」）。
+ * 这里以「写入 → 读回」往返断言守住该路径（非 Tauri 环境下 kv 走内存缓存，可同步验证）。
+ */
+describe('saveUserRules → loadUserRules 往返一致性', () => {
+  it('写入后能原样读回（含 enabled=false 不丢失）', () => {
+    const input: UserRule[] = [
+      { kind: 'categorize', match: '测试往返', to: '咖啡', enabled: true },
+      { kind: 'merchant_renamed', match: '金拱门', to: '麦记', enabled: false },
+    ];
+    saveUserRules(input);
+    expect(loadUserRules()).toEqual(input);
+  });
+
+  it('写入空数组后读回为空（删除最后一条不残留）', () => {
+    saveUserRules([]);
+    expect(loadUserRules()).toEqual([]);
   });
 });

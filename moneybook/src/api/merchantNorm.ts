@@ -53,10 +53,16 @@ export interface NormContext {
   rules?: UserRule[];
 }
 
-/** 读取用户规则（同步，来自启动时 hydrateKV 缓存的内存）。 */
+/**
+ * 读取用户规则（同步，来自启动时 hydrateKV 缓存的内存；库中为 JSON 字符串）。
+ * 历史缺陷（防回归）：曾直接 `parseUserRules(getKV(...))`——getKV 返回的是 JSON 字符串，
+ * 而 parseUserRules 只接受数组，导致读回永远为空数组（界面「添加后列表不出现、统计恒为 0」）。
+ * 与 importRules.ts 的 loadImportRules 保持一致：先取出原始字符串再 JSON.parse。
+ */
 export function loadUserRules(): UserRule[] {
   try {
-    return parseUserRules(getKV(RULES_KV_KEY));
+    const raw = getKV(RULES_KV_KEY);
+    return raw ? parseUserRules(JSON.parse(raw)) : [];
   } catch {
     return [];
   }

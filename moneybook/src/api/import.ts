@@ -3,6 +3,7 @@ import { execute, runInTransaction, select } from './db';
 import { currentLedgerId } from '@/lib/ledger';
 import { listAccounts } from '@/api/accounts';
 import { listCategories } from '@/api/categories';
+import { categorizeByRule, loadUserRules } from './merchantNorm';
 
 /**
  * 导入可产生的交易类型：
@@ -13,8 +14,8 @@ import { listCategories } from '@/api/categories';
  */
 export type ImportTxType = 'income' | 'expense' | 'transfer' | 'repay_in';
 
-/** 导入交易类型的展示标签（用于判定依据文案，前端不直接依赖） */
-const IMPORT_TYPE_LABEL: Record<ImportTxType, string> = {
+/** 导入交易类型的展示标签（用于判定依据文案与规则文档导出，前端不直接依赖） */
+export const IMPORT_TYPE_LABEL: Record<ImportTxType, string> = {
   income: '收入',
   expense: '支出',
   transfer: '转账',
@@ -112,6 +113,29 @@ export function matchImportRule(text: string, rules: ImportRule[] = []): ImportR
     if (r && r.enabled !== false && r.match && t.includes(r.match)) return r;
   }
   return null;
+}
+
+/**
+ * 归类兜底（语义打通）：导入解析收尾时，对尚未指定分类的行应用「归类规则」（文本 → 分类）。
+ * 背景（历史缺陷）：归类规则原本只在交易录入的 AI 建议环节生效，导入账单时完全不参与，
+ * 用户加了「星巴克 => 咖啡」后导入仍不会归到咖啡——同一意图「文本→分类」被拆成两条互不相通的路径。
+ * 现统一收口：资金流向规则未给出分类时，再查归类规则；账单自带分类的行保持不动（来源优先级更高）。
+ */
+function applyUserCategoryRules(rows: ImportRow[]): void {
+  const rules = loadUserRules();
+  if (!rules.some((r) => r.kind === 'categorize' && r.enabled)) return;
+  for (const r of rows) {
+    if (r.category) continue;
+    // 匹配文本口径与商户归并一致：收款方 + 备注（覆盖商家名与说明描述）
+    const text = [r.payee, r.note].filter(Boolean).join(' ');
+    if (!text) continue;
+    const hit = categorizeByRule(text, { rules });
+    if (hit) {
+      r.category = hit.category;
+      // 可解释：在判定依据里补充「分类来自归类规则」，用户可据此修正或删除规则
+      r.basis = r.basis ? `${r.basis}；分类命中${hit.via}` : `分类命中${hit.via}`;
+    }
+  }
 }
 
 type RefAccount = { id: number; name: string };
@@ -696,6 +720,9 @@ export function parseBillAOA(aoa: unknown[][], rules: ImportRule[] = []): { rows
       basis: `账单识别收支方向「${io}」→ ${IMPORT_TYPE_LABEL[type]}`,
     });
   }
+  // 收尾兜底：未指定分类的行查询「归类规则」（语义打通：归类规则在导入时同样生效）
+  applyUserCategoryRules(rows);
+  applyUserCategoryRules(skippedRows);
   return { rows, skippedRows, skipped, detected: true };
 }
 
@@ -835,6 +862,8 @@ export function parseAoaWithMap(
       ...(basis ? { basis } : {}),
     });
   }
+  // 收尾兜底：未指定分类的行查询「归类规则」（语义打通：与账单路径 parseBillAOA 口径一致）
+  applyUserCategoryRules(rows);
   return { rows, skipped };
 }
 

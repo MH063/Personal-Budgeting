@@ -41,3 +41,31 @@ export async function saveJSON(filename: string, data: unknown): Promise<string 
   await writeTextFile(dest, JSON.stringify(data, null, 2));
   return dest;
 }
+
+/** 浏览器环境：直接下载文本文件（桌面版用 saveText 弹系统对话框）。 */
+export function downloadText(filename: string, text: string) {
+  const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+/**
+ * 桌面（Tauri）环境：弹系统保存对话框写入文本文件，返回保存路径；用户取消返回 null。
+ * 与 saveJSON 同理：系统对话框让用户明确知道文件落盘位置（规则文档导出用）。
+ */
+export async function saveText(filename: string, text: string): Promise<string | null> {
+  const { save } = await import('@tauri-apps/plugin-dialog');
+  const { writeTextFile } = await import('@tauri-apps/plugin-fs');
+  const ext = filename.split('.').pop() || 'txt';
+  const dest = await save({
+    defaultPath: filename,
+    filters: [{ name: '文本文档', extensions: [ext, 'txt', 'md'] }],
+  });
+  if (!dest) return null; // 用户取消
+  await writeTextFile(dest, text);
+  return dest;
+}
