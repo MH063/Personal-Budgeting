@@ -484,7 +484,7 @@ export default function RuleManage() {
         <h3 className="mb-1 text-sm font-medium">规则文档导入</h3>
         <p className="mb-3 text-xs text-muted">
           规则统一通过文档导入建立（应用内不提供手动添加）：点右上角「下载模板」，按格式填写后用「导入文档」选择文件即可。
-          每行一条规则，# 注释与空行自动跳过；同一匹配词再次导入会按文档更新内容（修改规则同样是改文档后重新导入）。
+          每行一条规则，# / // 注释与空行自动跳过；同一匹配词再次导入会按文档更新内容（修改规则同样是改文档后重新导入）。
         </p>
         <div className="mb-3 space-y-1 rounded-md border border-[var(--border)] bg-black/2 px-3 py-2 text-xs dark:bg-white/5">
           <div>
@@ -495,7 +495,7 @@ export default function RuleManage() {
           </div>
           <div>
             <span className="text-muted">流向：</span>流向: 停车费 =&gt; 支出|交通|支付宝
-            <span className="ml-1 text-muted">（类型|分类|账户|转入账户，后三项可省略）</span>
+            <span className="ml-1 text-muted">（类型|分类|账户|转入账户，后三项可省略；转入账户仅转账类型使用）</span>
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2 border-t border-[var(--border)] pt-3">

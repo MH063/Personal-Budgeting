@@ -122,6 +122,13 @@ describe('buildRulesDocTemplate：格式模板', () => {
     expect(text).toContain('流向: 停车费 => 支出|交通|支付宝');
     expect(text).toContain('=> 或 -> 或 → 或 ⇒');
   });
+
+  it('模板说明与解析器行为一致：// 注释、转入账户限转账、无法解析行的处理', () => {
+    const text = buildRulesDocTemplate();
+    expect(text).toContain('#（或 //）');
+    expect(text).toContain('转入账户仅「转账」类型使用');
+    expect(text).toContain('无法解析的行会被汇总提示并跳过');
+  });
 });
 
 describe('mergeDocRules：文档优先合并', () => {
