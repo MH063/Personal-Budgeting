@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
+import { Link } from 'react-router-dom';
 import {
   bulkImportTransactions, getImportReferences, parseBillAOA, parseCsvText,
   accountsMatch, normalizeAccountName, rowFingerprint, rowKeyOf,
   buildColumnMap, parseAoaWithMap, IMPORT_FIELD_LABELS,
-  type ImportRow, type ImportSmoke, type ColumnMap, type ImportFieldKey, type ImportRule,
+  type ImportRow, type ImportSmoke, type ColumnMap, type ImportFieldKey,
 } from '@/api/import';
 import { loadImportRules, saveImportRules, pickRuleKeyword, shouldLearnCorrection, learnRuleFromCorrection, type LearnedRuleCandidate } from '@/api/importRules';
 import { recalcAccountBalances, updateTransaction } from '@/api/transactions';
@@ -93,9 +94,8 @@ export default function ImportManage() {
   const [skipView, setSkipView] = useState<{ log: ImportLog; skips: ImportSkip[]; loading: boolean } | null>(null);
   // 「补导入」二次确认：批量还原跳过数据为待导入行前先确认，避免误触加入大量行
   const [restoreConfirmOpen, setRestoreConfirmOpen] = useState(false);
-  // 用户自定义资金流向规则（存本机 settings，kv.importRules）
-  const [rules, setRules] = useState<ImportRule[]>(() => loadImportRules());
-  const [rulesOpen, setRulesOpen] = useState(false);
+  // 用户自定义资金流向规则的编辑 UI 已集中到「设置 → 智能规则」（用户要求规则统一一栏），
+  // 本页仅保留自动学习（修正后沉淀规则）与跳转入口。
   // 解析原值快照（rowKey → 解析时的 ImportRow）：导入时与修正后行对比，
   // 识别「用户手动改动」以自动学习资金流向规则；AI 智能归类填充不算用户修正，一并更新基线
   const origRowsRef = useRef<Map<string, ImportRow>>(new Map());
@@ -454,7 +454,8 @@ export default function ImportManage() {
 
   /**
    * 把若干「用户修正」自动沉淀为资金流向规则（幂等合并、纯本地、可编辑/停用），并写审计。
-   * 读最新规则集（而非组件内存态，避免覆盖其他入口的改动），合并后回写并刷新 UI。
+   * 读最新规则集（而非组件内存态，避免覆盖「智能规则」页里的改动），合并后回写；
+   * 规则编辑界面已集中到智能规则页，本页不再持有规则 state（历史缺陷：规则分散两处）。
    * @returns 本次实际学习/更新的关键词列表（为空表示无需学习）
    */
   async function applyLearnedRules(candidates: LearnedRuleCandidate[]): Promise<string[]> {
@@ -467,7 +468,6 @@ export default function ImportManage() {
     }
     if (!learned.length) return [];
     saveImportRules(next);
-    setRules(next);
     console.log('[导入规则学习] 沉淀规则：', learned.map((c) => `${c.match} → ${c.type}${c.account ? '/' + c.account : ''}${c.toAccount ? '→' + c.toAccount : ''}${c.category ? '(' + c.category + ')' : ''}`).join('；'));
     // 审计联动：记录学习动作，供「用户纠正→回写规则」闭环可观测
     for (const c of learned) {
@@ -563,7 +563,7 @@ export default function ImportManage() {
         }
         const learned = await applyLearnedRules(candidates);
         if (learned.length) {
-          toast.success(`已自动学习 ${learned.length} 条资金流向规则：${learned.join('、')}（可在「资金流向判定规则」中查看/停用）`, { duration: 6000 });
+          toast.success(`已自动学习 ${learned.length} 条资金流向规则：${learned.join('、')}（可在「设置 → 智能规则」中查看/停用）`, { duration: 6000 });
         }
       } catch { /* 学习失败不影响导入结果 */ }
       // 保留仍未恢复的「被跳过行」（等用户手动恢复），其余已入库行清空
@@ -676,35 +676,12 @@ export default function ImportManage() {
           if (cur.account && cur.account !== item.src.account) c.account = cur.account;
           if (item.type === 'transfer' && cur.toAccount && cur.toAccount !== item.src.toAccount) c.toAccount = cur.toAccount;
           const learned = await applyLearnedRules([c]);
-          if (learned.length) toast.info(`已学习规则「${match}」：同类导入将自动按此归类（可编辑/停用）`, { duration: 6000 });
+          if (learned.length) toast.info(`已学习规则「${match}」：同类导入将自动按此归类（可在「设置 → 智能规则」中编辑/停用）`, { duration: 6000 });
         }
       } catch { /* 学习失败不影响修正结果 */ }
     } catch (e) {
       toast.error(`修正失败：${(e as Error).message}`);
     }
-  }
-
-  /** 新增一条空白资金流向规则（默认支出，关键词留空待填） */
-  function addRule() {
-    setRules((prev) => [...prev, { match: '', type: 'expense', enabled: true }]);
-  }
-
-  /** 编辑规则字段 */
-  function patchRule(i: number, patch: Partial<ImportRule>) {
-    setRules((prev) => prev.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
-  }
-
-  /** 删除规则 */
-  function removeRule(i: number) {
-    setRules((prev) => prev.filter((_, idx) => idx !== i));
-  }
-
-  /** 保存规则到本机（丢弃关键词为空的项）；下次选择文件解析时生效 */
-  function persistRules() {
-    const valid = rules.filter((r) => r.match.trim());
-    setRules(valid);
-    saveImportRules(valid);
-    toast.success(`已保存 ${valid.length} 条规则（下次选择文件解析时生效）`);
   }
 
   return (
@@ -764,46 +741,11 @@ export default function ImportManage() {
             {recalcBusy ? '重算中…' : '重算账户余额'}
           </Button>
         </div>
-        {/* 资金流向判定规则：用户规则优先于内置识别（存本机 settings，kv.importRules），可解释、可复用 */}
-        <div className="mt-3 rounded-lg border border-[var(--border)] p-2">
-          <button type="button" onClick={() => setRulesOpen((v) => !v)} className="text-xs font-medium hover:underline">
-            资金流向判定规则（{rules.length} 条，可自定义）{rulesOpen ? ' ▲' : ' ▼'}
-          </button>
-          {rulesOpen && (
-            <div className="mt-2 space-y-2">
-              <div className="text-xs text-muted">
-                命中关键词（包含匹配）时按此规则判定资金流向，优先级高于内置识别（还款/退款/提现/收支方向）；可把某商家或某说明文本固定归到某类型、某账户或某分类。
-                在预览里修正行的类型/账户/分类并导入，或在「导入后待核对」保存修正后，会自动沉淀为规则（幂等合并；已停用的规则不会被自动覆盖）。
-              </div>
-              {rules.length === 0 && <div className="text-xs text-muted">暂无规则，点「添加规则」新建。</div>}
-              {rules.map((r, i) => (
-                <div key={i} className="flex flex-wrap items-center gap-1.5 text-xs">
-                  <input value={r.match} onChange={(e) => patchRule(i, { match: e.target.value })} placeholder="关键词"
-                    className="h-7 w-28 rounded border border-[var(--border)] bg-[var(--bg)] px-1" />
-                  <select value={r.type} onChange={(e) => patchRule(i, { type: e.target.value as ImportRule['type'] })}
-                    className="h-7 rounded border border-[var(--border)] bg-[var(--bg)] px-1 [color-scheme:inherit]">
-                    {IMPORT_TYPE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-                  </select>
-                  <input value={r.account ?? ''} onChange={(e) => patchRule(i, { account: e.target.value || undefined })} placeholder="账户(可空)"
-                    className="h-7 w-28 rounded border border-[var(--border)] bg-[var(--bg)] px-1" />
-                  <input value={r.toAccount ?? ''} onChange={(e) => patchRule(i, { toAccount: e.target.value || undefined })} placeholder="转入账户(转账用)"
-                    className="h-7 w-28 rounded border border-[var(--border)] bg-[var(--bg)] px-1" />
-                  <input value={r.category ?? ''} onChange={(e) => patchRule(i, { category: e.target.value || undefined })} placeholder="分类(可空)"
-                    className="h-7 w-24 rounded border border-[var(--border)] bg-[var(--bg)] px-1" />
-                  <label className="flex items-center gap-1">
-                    <input type="checkbox" checked={r.enabled !== false} onChange={(e) => patchRule(i, { enabled: e.target.checked })} />
-                    启用
-                  </label>
-                  <button type="button" onClick={() => removeRule(i)} title="删除该规则"
-                    className="flex h-6 w-6 items-center justify-center rounded-md text-sm text-muted hover:bg-[var(--color-danger)]/10 hover:text-[var(--color-danger)]">✕</button>
-                </div>
-              ))}
-              <div className="flex gap-2">
-                <Button type="button" variant="outline" size="sm" onClick={addRule}>+ 添加规则</Button>
-                <Button type="button" size="sm" onClick={persistRules}>保存规则</Button>
-              </div>
-            </div>
-          )}
+        {/* 资金流向判定规则的编辑已集中到「智能规则」页：本页仅保留跳转入口，避免规则分散（用户要求） */}
+        <div className="mt-3 rounded-lg border border-[var(--border)] p-2 text-xs text-muted">
+          资金流向判定规则已集中到
+          <Link to="/settings?tab=rules" className="mx-1 text-[var(--color-primary)] hover:underline">设置 → 智能规则</Link>
+          统一管理（含归类规则、商户归并与参考知识）；在本页预览/核对中修正归类仍会自动沉淀规则。
         </div>
         {/* 列映射预览：自定义模板/单文件时可手动指认表头列到业务字段 */}
         {colHeader.length > 0 && (

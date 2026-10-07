@@ -25,7 +25,7 @@ const GROUPS: { title: string; icon: string; desc: string; keys: string[] }[] = 
   { title: '分类与标签', icon: '🏷️', desc: '分类与标签的增删改', keys: ['category', 'tag'] },
   { title: '账户与模板', icon: '👛', desc: '账户管理、常用交易模板', keys: ['account', 'templates'] },
   { title: '预算与周期', icon: '📊', desc: '预算、周期性记账', keys: ['budget', 'recurring'] },
-  { title: '智能规则与 AI', icon: '🧠', desc: '智能规则、AI 助手', keys: ['rules', 'ai'] },
+  { title: '智能规则与 AI', icon: '🧠', desc: '全部规则、参考知识与 AI 助手', keys: ['rules', 'ai'] },
   { title: '数据备份与导出', icon: '💾', desc: '账目导入、报表导出与 JSON 导出、数据库备份', keys: ['import', 'export', 'backup'] },
   { title: '系统与存储', icon: '🖥️', desc: '存储空间、快捷键与关于系统', keys: ['storage', 'shortcut', 'about'] },
   { title: '使用说明', icon: '❓', desc: '使用说明', keys: ['help'] },
