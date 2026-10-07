@@ -14,9 +14,9 @@ import type { UserRule } from './merchantNorm';
  * 文档格式（每行一条；空行与 `#` / `//` 开头的注释行自动跳过）：
  *   星巴克 => 咖啡                            归类：匹配文本包含「星巴克」→ 分类「咖啡」
  *   归并: 金拱门 => 麦当劳                     商户归并：归并到规范商户名
- *   流向: 停车费 => 支出|交通|支付宝           资金流向判定：类型|分类|账户|转入账户（后三项可省略）
- * 分隔符支持 `=>`、`->`、`→`、`⇒`；前缀「归类 / 归并 / 流向」可中英文冒号。
- * 解析失败的行不报错终止，而是收集到 invalid 供界面提示用户核对。
+ *   流向: 停车费 => 支出|交通|支付宝           资金流向判定：类型|分类|账户|转入账户（尾部可省略、中间空位留空占位）
+ * 分隔符支持 `=>`、`->`、`→`、`⇒`；前缀「归类 / 归并 / 流向」必须带冒号（中英文均可，无前缀默认归类）。
+ * 流向字段竖线兼容全角「｜」；解析失败的行不报错终止，而是收集到 invalid 供界面提示用户核对。
  */
 
 /** 文档解析结果：三类执行规则 + 无法解析的行 */
@@ -72,7 +72,8 @@ export function parseRulesDoc(text: string): DocRules {
     if (!match || !target) { out.invalid.push(rawLine); continue; }
     if (kind === 'flow') {
       // 目标：类型|分类|账户|转入账户（后三项可省略，仅转账使用转入账户）
-      const [typeRaw = '', category = '', account = '', toAccount = ''] = target.split('|').map((s) => s.trim());
+      // 竖线兼容全角「｜」：中文输入法下用户常打出全角竖线，避免整行被判为非法
+      const [typeRaw = '', category = '', account = '', toAccount = ''] = target.split(/[|｜]/).map((s) => s.trim());
       const type = FLOW_TYPE_BY_LABEL[typeRaw];
       if (!type) { out.invalid.push(rawLine); continue; }
       out.flow.push({
@@ -92,11 +93,18 @@ export function parseRulesDoc(text: string): DocRules {
   return out;
 }
 
-/** 资金流向规则 → 文档目标文本（类型|分类|账户|转入账户，空字段省略） */
+/**
+ * 资金流向规则 → 文档目标文本（类型|分类|账户|转入账户）。
+ * 仅省略「尾部」空字段；中间空字段保留空位占位（如 `支出||支付宝`）——
+ * 历史缺陷（防回归）：曾用 filter 省略全部空字段，导致「分类为空、仅账户」的规则
+ * 导出后再导入时按 | 切分错位（账户值被当成分类）。
+ */
 function flowToDocTarget(r: ImportRule): string {
-  return [IMPORT_TYPE_LABEL[r.type] ?? r.type, r.category, r.account, r.toAccount]
-    .filter((s) => !!String(s ?? '').trim())
-    .join('|');
+  const cells = [IMPORT_TYPE_LABEL[r.type] ?? r.type, r.category ?? '', r.account ?? '', r.toAccount ?? '']
+    .map((s) => String(s ?? '').trim());
+  // 去掉尾部连续空单元格（文档更简洁），但保留中间空位以维持字段对齐
+  while (cells.length > 1 && !cells[cells.length - 1]) cells.pop();
+  return cells.join('|');
 }
 
 /**

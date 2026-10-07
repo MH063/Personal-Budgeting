@@ -521,6 +521,7 @@ export default function RuleManage() {
       const doc = parseRulesDoc(text);
       const added = applyDocRules(doc);
       console.log('[规则文档导入] 新增条数：', added, '；无法解析行：', doc.invalid.length);
+      if (doc.invalid.length) console.warn('[规则文档导入] 无法解析的行（已忽略）：', doc.invalid);
       if (!added && !doc.invalid.length) { toast.success('没有新增规则（可能已全部存在）'); return; }
       toast.success(
         `已导入 ${added} 条规则（重复项已自动跳过）${doc.invalid.length ? `；${doc.invalid.length} 行无法解析已忽略` : ''}`
@@ -569,7 +570,7 @@ export default function RuleManage() {
         <h3 className="mb-1 text-sm font-medium">＋ 添加规则</h3>
         <p className="mb-3 text-xs text-muted">
           选择一种动作录入；执行规则（归类 / 归并 / 资金流向）本地即时生效、不消耗 AI；AI 参考知识随请求发送给当前服务商。
-          也可用右上角「导入文档」按「匹配词 =&gt; 目标」每行一条批量录入。
+          也可用右上角「导入文档」批量录入（每行一条）：匹配词 =&gt; 分类（归类）；「归并: 匹配词 =&gt; 商户名」；「流向: 关键词 =&gt; 类型|分类|账户|转入账户」（可先「导出文档」参考示例格式）。
         </p>
         <div className="flex flex-wrap items-center gap-2">
           <Select

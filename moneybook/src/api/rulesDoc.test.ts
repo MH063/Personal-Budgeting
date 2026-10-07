@@ -49,6 +49,16 @@ describe('parseRulesDoc：规则文档解析', () => {
     const doc = parseRulesDoc('流向: 停车费 => 支出|交通|支付宝|某某卡');
     expect(doc.flow[0].toAccount).toBeUndefined();
   });
+
+  it('流向字段支持全角竖线「｜」分隔（中文输入法友好）', () => {
+    const doc = parseRulesDoc('流向: 停车费 => 支出｜交通｜支付宝');
+    expect(doc.flow[0]).toEqual({ match: '停车费', type: 'expense', category: '交通', account: '支付宝', toAccount: undefined, enabled: true });
+  });
+
+  it('流向中间空位留空占位：分类留空时账户不错位成分类', () => {
+    const doc = parseRulesDoc('流向: 停车费 => 支出||支付宝');
+    expect(doc.flow[0]).toEqual({ match: '停车费', type: 'expense', category: undefined, account: '支付宝', toAccount: undefined, enabled: true });
+  });
 });
 
 describe('buildRulesDocText：规则文档导出', () => {
@@ -81,6 +91,16 @@ describe('buildRulesDocText：规则文档导出', () => {
     expect(doc.categorize).toEqual([{ match: '星巴克', to: '咖啡' }]);
     expect(doc.merchant).toEqual([{ match: '金拱门', to: '麦当劳' }]);
     expect(doc.flow[0]).toEqual({ match: '停车费', type: 'expense', category: '交通', account: undefined, toAccount: undefined, enabled: true });
+    expect(doc.invalid).toEqual([]);
+  });
+
+  it('分类留空、仅账户的规则：导出保留空位占位，回读不错位（防字段错位回归）', () => {
+    const text = buildRulesDocText([], [
+      { match: '停车费', type: 'expense', account: '支付宝', enabled: true },
+    ]);
+    expect(text).toContain('流向: 停车费 => 支出||支付宝');
+    const doc = parseRulesDoc(text);
+    expect(doc.flow[0]).toEqual({ match: '停车费', type: 'expense', category: undefined, account: '支付宝', toAccount: undefined, enabled: true });
     expect(doc.invalid).toEqual([]);
   });
 });
