@@ -10,50 +10,19 @@ import {
 import { loadImportRules, saveImportRules, pickRuleKeyword, shouldLearnCorrection, learnRuleFromCorrection, type LearnedRuleCandidate } from '@/api/importRules';
 import { recalcAccountBalances, updateTransaction } from '@/api/transactions';
 import { isZip, tryExtractZipAsync, detectZipEncryption } from '@/api/importZip';
-import { recordImportLog, listImportLogs, listImportSkips, type ImportLog, type ImportSkip } from '@/api/importLog';
+import { recordImportLog, listImportLogs, type ImportLog, type ImportSkip } from '@/api/importLog';
 import { recordAudit } from '@/api/audit';
 import { suggestForText } from '@/api/aiSuggest';
 import { Button } from '@/components/ui/button';
 import { Hint } from '@/components/ui/hint';
-import { Modal } from '@/components/ui/modal';
-import { ConfirmDialog } from '@/components/common/ConfirmDialog';
-import { formatMoney } from '@/lib/format';
-
-/** 支付宝等导出的 CSV 常为 GBK 编码：优先按 UTF-8 解码，若出现替换符则视为 GBK 重解。 */
-function decodeText(buf: Uint8Array): string {
-  const hasBom = buf[0] === 0xef && buf[1] === 0xbb && buf[2] === 0xbf;
-  const data = hasBom ? buf.subarray(3) : buf;
-  const asUtf8 = new TextDecoder('utf-8', { fatal: false }).decode(data);
-  if (!hasBom && asUtf8.includes('\uFFFD')) {
-    try { return new TextDecoder('gbk').decode(data); } catch { /* 回退 utf-8 */ }
-  }
-  return asUtf8;
-}
+import ReconPanel from './import/ReconPanel';
+import ImportHistoryPanel from './import/ImportHistoryPanel';
+import PreviewDialog from './import/PreviewDialog';
+import PasswordDialog, { type PasswordModalState } from './import/PasswordDialog';
+import { decodeText, type ReconItem } from './import/helpers';
 
 // 表头别名推断已迁移至 import.buildColumnMap（含多字段认领策略）。
-
-/** 导入类型下拉选项（预览与「导入后待核对」共用） */
-const IMPORT_TYPE_OPTIONS: { value: ImportRow['type']; label: string }[] = [
-  { value: 'expense', label: '支出' },
-  { value: 'income', label: '收入' },
-  { value: 'transfer', label: '转账' },
-  { value: 'repay_in', label: '负债减少' },
-];
-
-/**
- * 「导入后待核对」项：可疑行（去向为账单推测）已按推测口径入库，
- * 携带库中交易 id 与解析后的账户 id，便于就地改类型/账户后回写该交易。
- */
-interface ReconItem {
-  id: number;
-  line: number;
-  pending: string;
-  /** 原始解析行（保留备注/订单号/支付时间等字段，回写时一并带回去，避免丢字段） */
-  src: ImportRow;
-  type: ImportRow['type'];
-  accountId: number;
-  toAccountId: number | null;
-}
+// 导入类型下拉选项、「待核对」项类型见 ./import/helpers；各弹窗与独立区块已拆为 ./import 下的子组件。
 
 export default function ImportManage() {
   const [rows, setRows] = useState<ImportRow[]>([]);
@@ -69,7 +38,7 @@ export default function ImportManage() {
   // 加密文件（微信 zip）解压密码
   const [password, setPassword] = useState('');
   // 解压密码对话框：选中加密 zip 时弹出，输入密码后即时重试解密
-  const [pwdModal, setPwdModal] = useState<{ file: File; text: string; error?: string } | null>(null);
+  const [pwdModal, setPwdModal] = useState<PasswordModalState | null>(null);
   // 导入历史审计
   const [importHist, setImportHist] = useState<ImportLog[]>([]);
   const [busy, setBusy] = useState(false);
@@ -89,11 +58,7 @@ export default function ImportManage() {
   // 解析结果弹窗：选择文件识别成功后以弹窗形式集中展示（用户要求，避免大表格挤在页面）；
   // 弹窗内可编辑修正并直接「开始导入」，关闭后预览数据保留在内存直至下次解析
   const [previewOpen, setPreviewOpen] = useState(false);
-  // 导入历史「跳过」明细查看弹窗：某次导入被跳过的数据（行号 + 原因 + 原始字段）持久化于
-  // import_skips 表，可追溯并可一键补导入（用户要求：跳过的数据不能无声无息丢掉）
-  const [skipView, setSkipView] = useState<{ log: ImportLog; skips: ImportSkip[]; loading: boolean } | null>(null);
-  // 「补导入」二次确认：批量还原跳过数据为待导入行前先确认，避免误触加入大量行
-  const [restoreConfirmOpen, setRestoreConfirmOpen] = useState(false);
+  // 导入历史「跳过明细」弹窗与「补导入」二次确认的状态已内聚到子组件 ImportHistoryPanel
   // 用户自定义资金流向规则的编辑 UI 已集中到「设置 → 智能规则」（用户要求规则统一一栏），
   // 本页仅保留自动学习（修正后沉淀规则）与跳转入口。
   // 解析原值快照（rowKey → 解析时的 ImportRow）：导入时与修正后行对比，
@@ -573,22 +538,11 @@ export default function ImportManage() {
     }
   }
 
-  /** 打开某次导入的「跳过明细」弹窗：从 import_skips 表读取持久化的明细（行号 + 原因 + 原始字段） */
-  async function openSkipView(log: ImportLog) {
-    setSkipView({ log, skips: [], loading: true });
-    try {
-      const skips = await listImportSkips(log.id);
-      setSkipView({ log, skips, loading: false });
-    } catch {
-      setSkipView({ log, skips: [], loading: false });
-      toast.error('读取跳过明细失败');
-    }
-  }
-
   /** 把某次导入的跳过明细还原为可导入行，追加到当前预览后即可重新导入（补导入）。
    *  还原时：仅取持久化的原始字段（日期/金额/账户等），清除跳过标记作为正常行；
-   *  行标识重新盖章，避免与当前预览中已有行互相覆盖（同文件行号可能重复）。 */
-  function restoreSkipsToImport(skips: ImportSkip[]) {
+   *  行标识重新盖章，避免与当前预览中已有行互相覆盖（同文件行号可能重复）。
+   *  @returns 是否成功还原（供 ImportHistoryPanel 决定是否关闭跳过明细弹窗） */
+  function restoreSkipsToImport(skips: ImportSkip[]): boolean {
     const restored: ImportRow[] = [];
     for (const sk of skips) {
       try {
@@ -615,11 +569,11 @@ export default function ImportManage() {
         });
       } catch { /* 单条还原失败忽略，其余照常补导入 */ }
     }
-    if (!restored.length) { toast.error('该批跳过明细缺少可还原的关键字段（日期/金额），无法补导入'); return; }
+    if (!restored.length) { toast.error('该批跳过明细缺少可还原的关键字段（日期/金额），无法补导入'); return false; }
     setRows((prev) => [...prev, ...restored]);
-    setSkipView(null);
     setPreviewOpen(true);
     toast.success(`已将 ${restored.length} 条跳过的数据加入待导入列表，请核对后开始导入`);
+    return true;
   }
 
   /** 更新某「待核对」项的本地选择（类型 / 账户 / 转入账户），点「保存」时才回写库 */
@@ -778,382 +732,45 @@ export default function ImportManage() {
       </div>
 
       {/* 导入后待核对：可疑行已按账单推测口径入库，此处就地改类型/账户并回写该交易 */}
-      {recon.length > 0 && (
-        <div className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-4">
-          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-            <h3 className="font-semibold">导入后待核对（{recon.length} 条）</h3>
-            <span className="text-xs text-muted">这些行已按账单推测口径入库；若去向不符，改类型/账户后点「保存」修正该交易。</span>
-          </div>
-          <div className="max-h-80 overflow-auto rounded-lg border border-[var(--border)]">
-            <table className="w-full min-w-[640px] table-fixed text-sm">
-              <thead className="sticky top-0 z-10 bg-[var(--bg)] text-left text-xs font-semibold text-[var(--fg)] shadow-[0_1px_0_0_var(--border)]">
-                <tr>
-                  <th className="w-12 px-2 py-2">行</th>
-                  <th className="w-28 px-2 py-2">日期</th>
-                  <th className="w-24 px-2 py-2">类型</th>
-                  <th className="w-28 px-2 py-2 text-right">金额</th>
-                  <th className="px-2 py-2">账户</th>
-                  <th className="hidden px-2 py-2 sm:table-cell">转入</th>
-                  <th className="w-32 px-2 py-2">操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                {recon.map((it) => (
-                  <tr key={it.id} className="border-t border-[var(--border)] bg-[var(--color-warning,#F59E0B)]/8">
-                    <td className="px-2 py-1.5 text-[var(--color-warning,#F59E0B)]" title={it.pending}>⚠ {it.line}</td>
-                    <td className="px-2 py-1.5">{it.src.date || '—'}</td>
-                    <td className="px-2 py-1.5">
-                      <select
-                        value={it.type}
-                        onChange={(e) => patchRecon(it.id, {
-                          type: e.target.value as ImportRow['type'],
-                          toAccountId: e.target.value === 'transfer' ? it.toAccountId : null,
-                        })}
-                        className="h-7 rounded border border-[var(--border)] bg-transparent px-1 text-xs [color-scheme:inherit]"
-                      >
-                        {IMPORT_TYPE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-                      </select>
-                    </td>
-                    <td className="px-2 py-1.5 text-right font-medium">{['income', 'repay_in'].includes(it.type) ? '+' : '-'}{formatMoney(it.src.amount)}</td>
-                    <td className="px-2 py-1.5">
-                      <select
-                        value={String(it.accountId)}
-                        onChange={(e) => patchRecon(it.id, { accountId: Number(e.target.value) })}
-                        className="h-7 w-full min-w-0 rounded border border-[var(--border)] bg-transparent px-1 text-xs [color-scheme:inherit]"
-                      >
-                        {(refs?.accounts ?? []).map((a) => <option key={a.id} value={String(a.id)}>{a.name}</option>)}
-                      </select>
-                    </td>
-                    <td className="hidden px-2 py-1.5 sm:table-cell">
-                      {it.type === 'transfer' ? (
-                        <select
-                          value={it.toAccountId == null ? '' : String(it.toAccountId)}
-                          onChange={(e) => patchRecon(it.id, { toAccountId: e.target.value ? Number(e.target.value) : null })}
-                          className="h-7 w-full min-w-0 rounded border border-[var(--border)] bg-transparent px-1 text-xs [color-scheme:inherit]"
-                        >
-                          <option value="">（选择转入账户）</option>
-                          {(refs?.accounts ?? []).map((a) => <option key={a.id} value={String(a.id)}>{a.name}</option>)}
-                        </select>
-                      ) : <span className="text-xs text-muted">—</span>}
-                    </td>
-                    <td className="w-28 px-2 py-1.5">
-                      <div className="flex items-center gap-1">
-                        <button type="button" onClick={() => void saveRecon(it)}
-                          className="rounded border border-[var(--color-primary)] px-2 py-0.5 text-xs text-[var(--color-primary-fg)] hover:bg-[var(--color-primary)]/10">保存</button>
-                        <button type="button" onClick={() => setRecon((prev) => prev.filter((x) => x.id !== it.id))}
-                          title="忽略：保持当前口径，移出待核对"
-                          className="flex h-6 w-6 items-center justify-center rounded-md text-sm text-muted hover:bg-black/5 dark:hover:bg-white/10">✕</button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-
-      {importHist.length > 0 && (
-        <div className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-4">
-          <h3 className="mb-2 font-semibold">导入历史</h3>
-          <div className="max-h-64 overflow-auto">
-            <table className="w-full text-xs">
-              <thead className="sticky top-0 bg-black/5 text-left text-muted dark:bg-white/5">
-                <tr>
-                  <th className="px-2 py-1.5">时间</th>
-                  <th className="px-2 py-1.5">文件</th>
-                  <th className="px-2 py-1.5">文件数</th>
-                  <th className="px-2 py-1.5">成功</th>
-                  <th className="px-2 py-1.5">跳过</th>
-                  <th className="px-2 py-1.5">重复</th>
-                  <th className="px-2 py-1.5">建账户</th>
-                  <th className="px-2 py-1.5">建分类</th>
-                </tr>
-              </thead>
-              <tbody>
-                {importHist.map((h) => (
-                  <tr key={h.id} className="border-t border-[var(--border)]">
-                    <td className="px-2 py-1 text-muted">{h.imported_at}</td>
-                    <td className="px-2 py-1">{h.file_name}</td>
-                    <td className="px-2 py-1">{h.file_count}</td>
-                    <td className="px-2 py-1">{h.imported}</td>
-                    <td className="px-2 py-1">
-                      {h.skipped > 0 ? (
-                        <button
-                          className="font-medium underline decoration-dotted underline-offset-2 text-[var(--color-primary-fg)] hover:opacity-80"
-                          title="查看被跳过的数据明细（可追溯、可补导入）"
-                          onClick={() => void openSkipView(h)}
-                        >
-                          {h.skipped}
-                        </button>
-                      ) : (
-                        h.skipped
-                      )}
-                    </td>
-                    <td className="px-2 py-1 text-[var(--color-warning,#F59E0B)]">{h.duplicates}</td>
-                    <td className="px-2 py-1">{h.created_accounts}</td>
-                    <td className="px-2 py-1">{h.created_categories}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-
-      {/* 解析结果弹窗：选择文件识别成功后集中展示（用户要求，避免预览大表格挤在页面）。
-          弹窗内可编辑修正误判，确认后直接「开始导入」；关闭仅收起弹窗，预览数据保留在内存。 */}
-      {/* 导入历史「跳过」明细弹窗：持久化的跳过数据（行号 + 原因 + 原始字段）可追溯、可补导入 */}
-      <Modal
-        open={!!skipView}
-        onClose={() => setSkipView(null)}
-        title={skipView ? `跳过数据明细（${skipView.skips.length} 条 · ${skipView.log.imported_at}）` : '跳过数据明细'}
-      >
-        {skipView && (
-          <div className="space-y-3">
-            <p className="text-xs text-muted">
-              以下数据在导入时被跳过、未进入账本；原因与原始字段已持久化保存，核对后可一键补导入。
-            </p>
-            {skipView.loading ? (
-              <p className="py-6 text-center text-xs text-muted">读取中…</p>
-            ) : skipView.skips.length === 0 ? (
-              <p className="py-6 text-center text-xs text-muted">该次导入没有持久化的跳过明细。</p>
-            ) : (
-              <>
-                <div className="max-h-72 overflow-auto">
-                  <table className="w-full text-xs">
-                    <thead className="sticky top-0 bg-black/5 text-left text-muted dark:bg-white/5">
-                      <tr>
-                        <th className="px-2 py-1.5">行号</th>
-                        <th className="px-2 py-1.5">原因</th>
-                        <th className="px-2 py-1.5">金额</th>
-                        <th className="px-2 py-1.5">账户</th>
-                        <th className="px-2 py-1.5">日期</th>
-                        <th className="px-2 py-1.5">备注</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {skipView.skips.map((sk) => {
-                        let row: Record<string, unknown> = {};
-                        try { row = JSON.parse(sk.row_data) as Record<string, unknown>; } catch { /* 解析失败按空处理 */ }
-                        return (
-                          <tr key={sk.id} className="border-t border-[var(--border)]">
-                            <td className="px-2 py-1 text-muted">第{sk.line}行</td>
-                            <td className="px-2 py-1" title={sk.reason}>{sk.reason}</td>
-                            <td className="px-2 py-1">{row.amount != null ? Number(row.amount) : '—'}</td>
-                            <td className="px-2 py-1">{String(row.account ?? '—')}</td>
-                            <td className="px-2 py-1 text-muted">{String(row.date ?? '—')}</td>
-                            <td className="max-w-[180px] truncate px-2 py-1 text-muted" title={String(row.note ?? '')}>
-                              {String(row.note ?? '—')}
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-                <div className="flex justify-end gap-2">
-                  <Button size="sm" variant="outline" onClick={() => setSkipView(null)}>关闭</Button>
-                  {/* 先弹二次确认，避免误触将大量跳过行批量加入待导入列表 */}
-                  <Button size="sm" onClick={() => setRestoreConfirmOpen(true)}>补导入（加入待导入列表）</Button>
-                </div>
-              </>
-            )}
-          </div>
-        )}
-      </Modal>
-
-      {/* 补导入二次确认：还原为待导入行（不直接进账本），确认后才加入预览列表供核对后导入 */}
-      <ConfirmDialog
-        open={restoreConfirmOpen}
-        title="补导入跳过的数据"
-        description={`将把本次 ${skipView?.skips.length ?? 0} 条被跳过的数据还原为待导入行（清除跳过标记、按原始字段恢复日期/金额/账户等），加入导入预览列表。它们不会直接进入账本，请在预览中核对修正后点击「开始导入」完成入库。确定补导入吗？`}
-        confirmText="确认补导入"
-        onConfirm={() => {
-          if (skipView) restoreSkipsToImport(skipView.skips);
-          setRestoreConfirmOpen(false);
-        }}
-        onClose={() => setRestoreConfirmOpen(false)}
+      <ReconPanel
+        recon={recon}
+        accounts={refs?.accounts ?? []}
+        onPatch={patchRecon}
+        onSave={saveRecon}
+        onRemove={(id) => setRecon((prev) => prev.filter((x) => x.id !== id))}
       />
 
-      <Modal open={previewOpen} onClose={() => setPreviewOpen(false)} title={`导入解析结果（${validRows.length} 条）`}>
-        <div className="space-y-3">
-          {/* 概要：识别 / 跳过 / 疑似重复 / 待确认 */}
-          <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted">
-            <span>识别 <b className="text-[var(--fg)]">{validRows.length}</b> 条</span>
-            <span>支出合计 <b className="text-[var(--fg)]">{formatMoney(total)}</b></span>
-            {pendingRows.length > 0 && (
-              <span className="text-[var(--color-warning,#F59E0B)]">⚠ {pendingRows.length} 行去向为账单推测（导入后待核对）</span>
-            )}
-            {dupLines.size > 0 && (
-              <span className="text-[var(--color-warning,#F59E0B)]">● {dupLines.size} 条疑似重复（导入时自动跳过）</span>
-            )}
-          </div>
-          {parseWarn.length > 0 && (
-            <div className="rounded-lg border-l-4 border-[var(--color-warning,#F59E0B)] bg-[var(--color-warning,#F59E0B)]/10 px-3 py-2 text-xs leading-relaxed text-[var(--fg)]">
-              <div className="mb-1 font-medium text-[var(--color-warning,#F59E0B)]">导入待确认（部分行被跳过或解析未识别）</div>
-              {parseWarn.slice(0, 6).map((w, i) => <div key={i} className="text-muted">{w}</div>)}
-              {parseWarn.length > 6 && <div className="text-muted">…共 {parseWarn.length} 条未解析</div>}
-            </div>
-          )}
-          {/* 将自动创建的账户：可改名到已有账户以复用，避免误建重复账户 */}
-          {pendingAccounts.length > 0 && (
-            <div>
-              <div className="mb-1 text-xs text-muted">导入时将自动创建账户（可改名到已有账户以复用，避免重复）：</div>
-              <div className="flex flex-wrap gap-2">
-                {pendingAccounts.map((n) => (
-                  <label key={n} className="flex items-center gap-1 rounded-full border border-[var(--border)] bg-black/2 px-2 py-1 text-xs dark:bg-white/5">
-                    <input
-                      value={n}
-                      onChange={(e) => renamePending(n, e.target.value)}
-                      className="w-32 rounded bg-transparent outline-none"
-                    />
-                  </label>
-                ))}
-              </div>
-            </div>
-          )}
-          {/* 可编辑预览：修正误判后点「开始导入」 */}
-          {pendingRows.length > 0 && (
-            <div className="flex flex-wrap items-center gap-2 rounded-lg border-l-4 border-[var(--color-warning,#F59E0B)] bg-[var(--color-warning,#F59E0B)]/10 px-3 py-2 text-xs">
-              <span className="text-[var(--color-warning,#F59E0B)]">
-                ⚠ {pendingRows.length} 行去向为账单推测（退款到账账户 / 提现到账卡）：将按推测口径先入库，导入后可在下方「导入后待核对」逐条修正。
-              </span>
-              <button type="button"
-                onClick={() => setRows((prev) => prev.map((r) => (r._pending ? { ...r, _pending: undefined } : r)))}
-                title="这些行的推测去向已足够确定，无需导入后复核"
-                className="rounded border border-[var(--color-warning,#F59E0B)] px-2 py-0.5 text-[var(--color-warning,#F59E0B)] hover:bg-[var(--color-warning,#F59E0B)]/10">
-                均无需复核
-              </button>
-            </div>
-          )}
-          <div className="max-h-72 overflow-auto rounded-lg border border-[var(--border)]">
-            <table className="w-full min-w-[640px] table-fixed text-sm">
-              <thead className="sticky top-0 z-10 bg-[var(--bg)] text-left text-xs font-semibold text-[var(--fg)] shadow-[0_1px_0_0_var(--border)]">
-                <tr>
-                  <th className="w-12 px-2 py-2">行</th>
-                  <th className="w-28 px-2 py-2">日期</th>
-                  <th className="w-20 px-2 py-2">类型</th>
-                  <th className="w-28 px-2 py-2 text-right">金额</th>
-                  <th className="px-2 py-2">账户</th>
-                  <th className="hidden px-2 py-2 sm:table-cell">转入</th>
-                  <th className="hidden px-2 py-2 md:table-cell">分类</th>
-                  <th className="hidden px-2 py-2 lg:table-cell">备注</th>
-                  <th className="w-20 px-2 py-2"></th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((r) => {
-                  const key = rowKeyOf(r);
-                  const isSkipped = !!r._skippedReason;
-                  const isPending = !isSkipped && !!r._pending;
-                  return (
-                  <tr key={key} className={`border-t border-[var(--border)] ${
-                    isSkipped ? 'bg-black/2 dark:bg-white/5'
-                      : isPending ? 'bg-[var(--color-warning,#F59E0B)]/8'
-                      : dupLines.has(r.line) ? 'bg-[var(--color-warning,#F59E0B)]/5' : ''
-                  }`}>
-                    <td className="px-2 py-1.5 text-muted">
-                      {dupLines.has(r.line) && <span className="mr-1 text-[var(--color-warning,#F59E0B)]" title="疑似重复导入，将被跳过">●</span>}
-                      {isSkipped && <span className="mr-1 text-[var(--color-warning,#F59E0B)]" title={r._skippedReason}>⏭</span>}
-                      {isPending && <span className="mr-1 text-[var(--color-warning,#F59E0B)]" title={r._pending}>⚠</span>}
-                      {!isSkipped && !isPending && r.basis && (
-                        <span className="mr-1 cursor-help text-[var(--color-muted)]" title={r.basis}>ℹ</span>
-                      )}
-                      {r.line}
-                    </td>
-                    <td className="px-2 py-1.5">{r.date}</td>
-                    <td className="px-2 py-1.5">
-                      {isSkipped && (
-                        <div className="flex items-center gap-1">
-                          <span className="text-xs text-[var(--color-warning,#F59E0B)]" title={r._skippedReason}>已跳过</span>
-                          <button type="button"
-                            onClick={() => patchRow(key, { type: 'expense', _skippedReason: undefined })}
-                            className="rounded border border-[var(--color-primary)] px-1 text-xs text-[var(--color-primary-fg)] hover:bg-[var(--color-primary)]/10" title="按支出恢复">支出</button>
-                          <button type="button"
-                            onClick={() => patchRow(key, { type: 'income', _skippedReason: undefined })}
-                            className="rounded border border-[var(--color-primary)] px-1 text-xs text-[var(--color-primary-fg)] hover:bg-[var(--color-primary)]/10" title="按收入恢复">收入</button>
-                        </div>
-                      )}
-                      {!isSkipped && (
-                      <div className="flex items-center gap-1">
-                        <select
-                          value={r.type}
-                          onChange={(e) => patchRow(key, { type: e.target.value as ImportRow['type'] })}
-                          className="h-7 w-full min-w-0 rounded border border-[var(--border)] bg-transparent px-1 text-xs [color-scheme:inherit]"
-                        >
-                          {IMPORT_TYPE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-                        </select>
-                      </div>
-                      )}
-                    </td>
-                    <td className="px-2 py-1.5 text-right font-medium">{isSkipped ? '' : ['income', 'repay_in'].includes(r.type) ? '+' : '-'}{formatMoney(r.amount)}</td>
-                    <td className="px-2 py-1.5">
-                      <input value={r.account} onChange={(e) => patchRow(key, { account: e.target.value, _pending: undefined })}
-                        className="w-full min-w-0 rounded border border-transparent bg-transparent px-1.5 py-0.5 text-xs outline-none transition-colors hover:border-[var(--border)] focus:border-[var(--color-primary)]" />
-                    </td>
-                    <td className="hidden px-2 py-1.5 sm:table-cell">
-                      <input value={r.toAccount ?? ''} onChange={(e) => patchRow(key, { toAccount: e.target.value || undefined, _pending: undefined })}
-                        className="w-full min-w-0 rounded border border-transparent bg-transparent px-1.5 py-0.5 text-xs outline-none transition-colors hover:border-[var(--border)] focus:border-[var(--color-primary)]" />
-                    </td>
-                    <td className="hidden px-2 py-1.5 md:table-cell">
-                      <input value={r.category ?? ''} onChange={(e) => patchRow(key, { category: e.target.value || undefined })}
-                        className="w-full min-w-0 rounded border border-transparent bg-transparent px-1.5 py-0.5 text-xs outline-none transition-colors hover:border-[var(--border)] focus:border-[var(--color-primary)]" />
-                    </td>
-                    <td className="hidden px-2 py-1.5 lg:table-cell">
-                      <input value={r.note ?? ''} onChange={(e) => patchRow(key, { note: e.target.value || undefined })}
-                        className="w-full min-w-0 rounded border border-transparent bg-transparent px-1.5 py-0.5 text-xs outline-none transition-colors hover:border-[var(--border)] focus:border-[var(--color-primary)]" />
-                    </td>
-                    <td className="px-2 py-1.5">
-                      <div className="flex items-center justify-end gap-1">
-                        {isPending && (
-                          <button type="button" onClick={() => confirmRow(key)} title={r._pending}
-                            className="rounded border border-[var(--color-warning,#F59E0B)] px-1.5 py-0.5 text-xs text-[var(--color-warning,#F59E0B)] hover:bg-[var(--color-warning,#F59E0B)]/10">确认</button>
-                        )}
-                        <button type="button" onClick={() => removeRow(key)} title={isSkipped ? '移出待确认列表' : '移出本次导入'}
-                          className="flex h-6 w-6 items-center justify-center rounded-md text-sm text-muted transition-colors hover:bg-[var(--color-danger)]/10 hover:text-[var(--color-danger)]">✕</button>
-                      </div>
-                    </td>
-                  </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-          <div className="flex flex-wrap items-center justify-end gap-2 border-t border-[var(--border)] pt-3">
-            <span className="mr-auto text-xs text-muted">类型 / 账户 / 分类 / 备注可直接编辑以修正误判</span>
-            <Button variant="outline" size="sm" onClick={() => setPreviewOpen(false)}>关闭</Button>
-            <Button size="sm" onClick={() => void doImport()} disabled={!validRows.length || busy}>
-              {busy ? '导入中…' : `开始导入 ${validRows.length} 条`}
-            </Button>
-          </div>
-        </div>
-      </Modal>
+      <ImportHistoryPanel logs={importHist} onRestoreSkips={restoreSkipsToImport} />
+
+      {/* 解析结果弹窗：选择文件识别成功后集中展示（用户要求，避免预览大表格挤在页面）。
+          弹窗内可编辑修正误判，确认后直接「开始导入」；关闭仅收起弹窗，预览数据保留在内存。
+          （「跳过明细」弹窗与补导入二次确认已内聚到 ImportHistoryPanel。） */}
+      <PreviewDialog
+        open={previewOpen}
+        onClose={() => setPreviewOpen(false)}
+        rows={rows}
+        validCount={validRows.length}
+        total={total}
+        pendingRows={pendingRows}
+        dupLines={dupLines}
+        parseWarn={parseWarn}
+        pendingAccounts={pendingAccounts}
+        onRenamePending={renamePending}
+        onPatchRow={patchRow}
+        onConfirmRow={confirmRow}
+        onRemoveRow={removeRow}
+        onClearPending={() => setRows((prev) => prev.map((r) => (r._pending ? { ...r, _pending: undefined } : r)))}
+        onImport={() => void doImport()}
+        busy={busy}
+      />
 
       {/* 加密账单解压密码对话框：选中 zip 后弹出，输入密码即时重试解密 */}
-      <Modal open={!!pwdModal} onClose={() => setPwdModal(null)} title="输入解压密码">
-        {pwdModal && (
-          <div className="space-y-3">
-            <p className="text-sm text-muted">
-              文件「{pwdModal.file.name}」为加密压缩包，请输入解压密码以在本机解密后导入（全程离线，不上传）。
-              {pwdModal.error && <span className="mt-1 block text-xs text-[var(--color-danger)]">{pwdModal.error}</span>}
-            </p>
-            <input
-              type="password"
-              autoFocus
-              value={pwdModal.text}
-              onChange={(e) => updatePwdText(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter') void confirmPwd(); }}
-              placeholder="解压密码"
-              className="h-10 w-full rounded-lg border border-[var(--border)] bg-[var(--bg)] px-3 text-sm outline-none focus:border-[var(--color-primary)]"
-            />
-            <div className="flex justify-end gap-2">
-              <Button variant="outline" size="sm" onClick={() => setPwdModal(null)}>取消</Button>
-              <Button size="sm" onClick={() => void confirmPwd()}>解密并导入</Button>
-            </div>
-          </div>
-        )}
-      </Modal>
+      <PasswordDialog
+        modal={pwdModal}
+        onClose={() => setPwdModal(null)}
+        onTextChange={updatePwdText}
+        onConfirm={() => void confirmPwd()}
+      />
     </div>
   );
 }

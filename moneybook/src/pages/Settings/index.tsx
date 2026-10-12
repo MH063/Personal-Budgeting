@@ -27,8 +27,9 @@ const GROUPS: { title: string; icon: string; desc: string; keys: string[] }[] = 
   { title: '预算与周期', icon: '📊', desc: '预算、周期性记账', keys: ['budget', 'recurring'] },
   { title: '智能规则与 AI', icon: '🧠', desc: '全部规则、参考知识与 AI 助手', keys: ['rules', 'ai'] },
   { title: '数据备份与导出', icon: '💾', desc: '账目导入、报表导出与 JSON 导出、数据库备份', keys: ['import', 'export', 'backup'] },
-  { title: '系统与存储', icon: '🖥️', desc: '存储空间、快捷键与关于系统', keys: ['storage', 'shortcut', 'about'] },
-  { title: '使用说明', icon: '❓', desc: '使用说明', keys: ['help'] },
+  // 「使用说明」原单独成组且仅 1 项，显得单薄；并入「系统与存储」并更名为「系统与帮助」，
+  // 与「关于系统」相邻成组，减少一个空壳分组（与帮助页分组顺序保持呼应）。
+  { title: '系统与帮助', icon: '🖥️', desc: '存储空间、快捷键、关于系统与使用说明', keys: ['storage', 'shortcut', 'about', 'help'] },
 ];
 const keyLabel = (k: string) => SETTINGS_TABS.find((t) => t.key === k)?.label ?? k;
 

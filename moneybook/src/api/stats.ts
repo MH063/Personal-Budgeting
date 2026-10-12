@@ -302,6 +302,29 @@ async function catExpense(lid: number, start: string, end: string): Promise<CatR
   );
 }
 
+/**
+ * 洞察页「数据积累度」：返回当前账本的交易笔数与覆盖的月份跨度（含首末月，不足 1 计 1）。
+ * 用途：智能洞察页的数据分级展示——笔数/月数不足时把低价值区块（商户画像、异常检测、
+ * 订阅识别、疑似重复）收进「数据积累中」折叠区，避免平铺空壳区块；达标后自动平铺。
+ * 全部为本地查询，未达标时也不生成任何模拟数据。
+ */
+export async function getInsightDataLevel(): Promise<{ txnCount: number; monthSpan: number }> {
+  const [row] = await select<{ c: number; mn: string | null; mx: string | null }>(
+    `SELECT COUNT(*) AS c, MIN(date) AS mn, MAX(date) AS mx
+     FROM transactions WHERE ledger_id = $1`,
+    [currentLedgerId()]
+  );
+  const txnCount = row?.c ?? 0;
+  let monthSpan = 0;
+  if (row?.mn && row?.mx) {
+    // 首末月都计入：同月记 1，跨月按自然月差 + 1
+    monthSpan = dayjs(row.mx).startOf('month').diff(dayjs(row.mn).startOf('month'), 'month') + 1;
+  }
+  // 关键位置打印日志，便于控制台核对门槛判定
+  console.log('[insights] 数据积累度：笔数=', txnCount, '月份跨度=', monthSpan);
+  return { txnCount, monthSpan };
+}
+
 /** 生成某锚定月的智能洞察：分类突增检测 + 预算达标 + 支出健康度评分 */
 export async function getInsights(anchorYm: string = dayjs().format('YYYY-MM')): Promise<InsightsResult> {
   const lid = currentLedgerId();

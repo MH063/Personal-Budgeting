@@ -1,9 +1,12 @@
 import { useState } from 'react';
+import { Link } from 'react-router-dom';
+import { SETTINGS_TABS } from '@/lib/settingsTabs';
 
 /* ============================================================
  * 使用说明 / 帮助页
  * 用数据驱动渲染，覆盖本应用全部功能并给出分步操作指南。
  * 分组卡片 + 图标标识 + 步骤编号，亮色/暗色均保证对比清晰。
+ * 分组顺序与「设置」侧栏一致，每组末尾附「直达入口」，消除「看得到找不到」。
  * ============================================================ */
 
 interface GuideItem {
@@ -13,18 +16,33 @@ interface GuideItem {
   steps: string[];       // 分步操作说明
 }
 
+/** 直达入口：设置子页用 /settings?tab=key，独立页面用路由路径 */
+interface GuideLink { to: string; label: string }
+
 interface GuideGroup {
   key: string;
   title: string;
   accent: string;        // 分组标识色（用于左侧色条 / 标题点）
   items: GuideItem[];
+  links: GuideLink[];    // 分组末尾的「直达入口」按钮
 }
 
+/** 设置子页直达入口：label 直接复用 SETTINGS_TABS，保证与设置侧栏命名逐字一致 */
+function tabLink(key: string): GuideLink {
+  return { to: `/settings?tab=${key}`, label: SETTINGS_TABS.find((t) => t.key === key)?.label ?? key };
+}
+
+/**
+ * 帮助分组：顺序与「设置」侧栏分组保持一致（分类·标签·预算 → 账户 → 记账/周期 → 统计洞察 → 数据），
+ * 使「帮助」与「设置」形成一致的心智模型；每组末尾附「直达入口」跳转到对应页面或设置分区。
+ * 「快速上手」为通用入门，置于最前，不占用设置侧栏的分组位。
+ */
 const GROUPS: GuideGroup[] = [
   {
     key: 'start',
     title: '快速上手',
     accent: '#10B981',
+    links: [tabLink('account'), tabLink('shortcut')],
     items: [
       {
         icon: '🚀',
@@ -49,12 +67,86 @@ const GROUPS: GuideGroup[] = [
     ],
   },
   {
+    key: 'plan',
+    title: '分类 · 标签 · 预算',
+    accent: '#8B5CF6',
+    links: [tabLink('category'), tabLink('tag'), tabLink('budget')],
+    items: [
+      {
+        icon: '📊',
+        title: '预算管理',
+        desc: '按账户设月度/年度预算，支持滚动结转与超支提醒。',
+        steps: [
+          '在【设置 → 预算】为账户新增预算及金额。',
+          '月度预算自动滚动，上期结余结转至下期。',
+          '接近上限（≥80%）显示黄点、超支显示红点并提醒，记账不受阻。',
+        ],
+      },
+      {
+        icon: '📁',
+        title: '分类管理',
+        desc: '自定义收入/支出分类及图标，用于统计归集。',
+        steps: [
+          '在【设置 → 分类】新建或编辑分类，选择图标。',
+          '记账时选择分类，统计数据与图表按分类聚合。',
+        ],
+      },
+      {
+        icon: '🏷️',
+        title: '标签管理',
+        desc: '给交易打标签，用于跨分类的二次归类。',
+        steps: [
+          '在【设置 → 标签】维护标签列表。',
+          '记账或编辑交易时附加标签，统计/洞察可按标签查看。',
+        ],
+      },
+    ],
+  },
+  {
+    key: 'asset',
+    title: '账户 · 储蓄 · 借贷',
+    accent: '#F59E0B',
+    links: [tabLink('account'), { to: '/savings', label: '储蓄' }, { to: '/loans', label: '借贷' }],
+    items: [
+      {
+        icon: '🏦',
+        title: '账户管理',
+        desc: '维护现金、银行卡、电子钱包、信用卡、应收应付等资产账户。',
+        steps: [
+          '在【设置 → 账户】中新建账户，选择类型并填写当前余额。',
+          '可设定账户图标便于区分；转账记录账户间资金移动。',
+        ],
+      },
+      {
+        icon: '🐷',
+        title: '储蓄目标',
+        desc: '为目标金额分账户归集，支持自动计提。',
+        steps: [
+          '在【储蓄】页新建目标，设定目标金额与目标日期。',
+          '选择归集账户并设定每月自动计提金额。',
+          '储蓄进度按转入金额累计，可在仪表板/储蓄页查看达标情况。',
+        ],
+      },
+      {
+        icon: '🎯',
+        title: '借贷管理',
+        desc: '管理借出、借入、还款计划与应计利息。',
+        steps: [
+          '在【借贷】页登记借出/借入及还款计划（一次还本付息或等额本息）。',
+          '逾期利息按规则自动累计，通知中心会提醒到期与逾期。',
+          '收到/偿还后登记还款，系统自动更新应收应付。',
+        ],
+      },
+    ],
+  },
+  {
     key: 'book',
     title: '记账与交易',
     accent: '#1E6FA9',
+    links: [tabLink('ai'), tabLink('recurring'), { to: '/transactions', label: '流水' }],
     items: [
       {
-        icon: '💰',
+        icon: '�',
         title: '手工记账',
         desc: '录入收入、支出、转账、借贷等交易。',
         steps: [
@@ -97,80 +189,15 @@ const GROUPS: GuideGroup[] = [
     ],
   },
   {
-    key: 'asset',
-    title: '账户 · 储蓄 · 借贷',
-    accent: '#F59E0B',
-    items: [
-      {
-        icon: '🏦',
-        title: '账户管理',
-        desc: '维护现金、银行卡、电子钱包、信用卡、应收应付等资产账户。',
-        steps: [
-          '在【设置 → 账户】中新建账户，选择类型并填写当前余额。',
-          '可设定账户图标便于区分；转账记录账户间资金移动。',
-        ],
-      },
-      {
-        icon: '🐷',
-        title: '储蓄目标',
-        desc: '为目标金额分账户归集，支持自动计提。',
-        steps: [
-          '在【储蓄】页新建目标，设定目标金额与目标日期。',
-          '选择归集账户并设定每月自动计提金额。',
-          '储蓄进度按转入金额累计，可在仪表板/储蓄页查看达标情况。',
-        ],
-      },
-      {
-        icon: '🎯',
-        title: '借贷管理',
-        desc: '管理借出、借入、还款计划与应计利息。',
-        steps: [
-          '在【借贷】页登记借出/借入及还款计划（一次还本付息或等额本息）。',
-          '逾期利息按规则自动累计，通知中心会提醒到期与逾期。',
-          '收到/偿还后登记还款，系统自动更新应收应付。',
-        ],
-      },
-    ],
-  },
-  {
-    key: 'plan',
-    title: '预算 · 分类 · 标签',
-    accent: '#8B5CF6',
-    items: [
-      {
-        icon: '📊',
-        title: '预算管理',
-        desc: '按账户设月度/年度预算，支持滚动结转与超支提醒。',
-        steps: [
-          '在【设置 → 预算】为账户新增预算及金额。',
-          '月度预算自动滚动，上期结余结转至下期。',
-          '接近上限（≥80%）显示黄点、超支显示红点并提醒，记账不受阻。',
-        ],
-      },
-      {
-        icon: '📁',
-        title: '分类管理',
-        desc: '自定义收入/支出分类及图标，用于统计归集。',
-        steps: [
-          '在【设置 → 分类】新建或编辑分类，选择图标。',
-          '记账时选择分类，统计数据与图表按分类聚合。',
-        ],
-      },
-      {
-        icon: '🏷️',
-        title: '标签管理',
-        desc: '给交易打标签，用于跨分类的二次归类。',
-        steps: [
-          '在【设置 → 标签】维护标签列表。',
-          '记账或编辑交易时附加标签，统计/洞察可按标签查看。',
-        ],
-      },
-    ],
-  },
-  {
     key: 'analyze',
     title: '统计 · 洞察 · 对账',
     accent: '#EC4899',
+    links: [
+      { to: '/stats', label: '统计' },
+      { to: '/insights', label: '洞察' },
+      { to: '/calendar', label: '日历' },
+      { to: '/reconcile', label: '银行对账' },
+    ],
     items: [
       {
         icon: '📈',
@@ -215,6 +242,7 @@ const GROUPS: GuideGroup[] = [
     key: 'data',
     title: '数据安全与维护',
     accent: '#EF4444',
+    links: [tabLink('import'), tabLink('export'), tabLink('backup'), { to: '/trash', label: '回收站' }],
     items: [
       {
         icon: '📥',
@@ -324,9 +352,26 @@ function GroupHeader({ g }: { g: GuideGroup }) {
         <span className="text-xs text-muted transition-transform" style={{ transform: open ? 'rotate(180deg)' : 'none' }}>▾</span>
       </button>
       {open && (
-        <div className="mt-3 grid grid-cols-1 gap-4 lg:grid-cols-2">
-          {g.items.map((it) => <GuideCard key={it.title} item={it} accent={g.accent} />)}
-        </div>
+        <>
+          <div className="mt-3 grid grid-cols-1 gap-4 lg:grid-cols-2">
+            {g.items.map((it) => <GuideCard key={it.title} item={it} accent={g.accent} />)}
+          </div>
+          {/* 直达入口：跳转到本组对应的设置分区 / 独立页面，消除「看得到找不到」 */}
+          {g.links.length > 0 && (
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <span className="text-xs text-muted">直达入口：</span>
+              {g.links.map((l) => (
+                <Link
+                  key={`${l.to}|${l.label}`}
+                  to={l.to}
+                  className="rounded-full border border-[var(--border)] bg-[var(--card)] px-2.5 py-1 text-xs text-[var(--fg)] transition-colors hover:border-[var(--color-primary)] hover:text-[var(--color-primary)]"
+                >
+                  {l.label} →
+                </Link>
+              ))}
+            </div>
+          )}
+        </>
       )}
     </div>
   );
