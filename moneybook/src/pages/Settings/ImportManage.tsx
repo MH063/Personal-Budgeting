@@ -13,6 +13,7 @@ import { isZip, tryExtractZipAsync, detectZipEncryption } from '@/api/importZip'
 import { recordImportLog, listImportLogs, type ImportLog, type ImportSkip } from '@/api/importLog';
 import { recordAudit } from '@/api/audit';
 import { suggestForText } from '@/api/aiSuggest';
+import { PLATFORM_PRESETS, matchPlatformPreset, presetToColumnMap } from '@/api/platformPresets';
 import { Button } from '@/components/ui/button';
 import { Hint } from '@/components/ui/hint';
 import ReconPanel from './import/ReconPanel';
@@ -53,6 +54,8 @@ export default function ImportManage() {
   const [colHeader, setColHeader] = useState<string[]>([]);
   const [colMap, setColMap] = useState<ColumnMap>({});
   const [mapAoa, setMapAoa] = useState<unknown[][] | null>(null);
+  // 平台模板：'auto' = 自动识别（buildColumnMap）；其余为 PLATFORM_PRESETS 的 id（按平台常见列名套用）
+  const [platformId, setPlatformId] = useState<string>('auto');
   // 「导入后待核对」：可疑行已按推测口径入库，此处按库中交易 id 逐条修正（改类型/账户）
   const [recon, setRecon] = useState<ReconItem[]>([]);
   // 解析结果弹窗：选择文件识别成功后以弹窗形式集中展示（用户要求，避免大表格挤在页面）；
@@ -143,14 +146,18 @@ export default function ImportManage() {
       bill.skipped.forEach((s) => skipped.push(s));
       return { rows: bill.rows, skippedRows: bill.skippedRows, warn: skipped.map((s) => `「${name}」跳过 1 行：${s}`) };
     }
-    // 自定义模板：自动推断列映射；单文件时保留表头供用户手动调整
+    // 自定义模板：优先按「平台模板」（文件名/表头特征词）套用列映射，否则自动推断；
+    // 单文件时保留表头供用户手动调整（平台可切换）
     const headerRow = aoa.find((r) => (r as unknown[]).some((c) => String(c ?? '').trim() !== '')) ?? [];
     const header = (headerRow as unknown[]).map((c) => String(c ?? '').trim());
-    const map = buildColumnMap(header);
+    const matched = matchPlatformPreset(header, name);
+    const map = matched ? presetToColumnMap(matched, header) : buildColumnMap(header);
     if (fileCount === 1) {
       setColHeader(header);
       setColMap(map);
       setMapAoa(aoa);
+      setPlatformId(matched ? matched.id : 'auto');
+      if (matched) toast.message(`已识别为「${matched.name}」账单，自动套用其列映射（可在列映射预览中调整）`);
     }
     const p = parseAoaWithMap(aoa, map, 0, loadImportRules());
     return { rows: p.rows, skippedRows: [], warn: p.skipped.map((s) => `「${name}」跳过 1 行：${s}`) };
@@ -281,6 +288,15 @@ export default function ImportManage() {
       else next[field] = colIdx;
       return next;
     });
+  }
+
+  /** 套用平台模板：'auto' 用自动推断；其余按对应平台的常见列名套用映射。
+   *  仅更新映射（需再点「应用映射」重解析），与「还原自动」按钮同一路径。 */
+  function applyPlatform(id: string) {
+    setPlatformId(id);
+    if (id === 'auto') { setColMap(buildColumnMap(colHeader)); return; }
+    const preset = PLATFORM_PRESETS.find((p) => p.id === id);
+    if (preset) setColMap(presetToColumnMap(preset, colHeader));
   }
 
   async function downloadTemplate() {
@@ -703,6 +719,18 @@ export default function ImportManage() {
             </button>
             {mapOpen && (
               <div className="mt-2">
+                <div className="mb-2 flex flex-wrap items-center gap-2 text-xs">
+                  <span className="text-muted">平台模板</span>
+                  <select
+                    value={platformId}
+                    onChange={(e) => applyPlatform(e.target.value)}
+                    className="h-7 rounded border border-[var(--border)] bg-[var(--card)] px-1 text-xs"
+                  >
+                    <option value="auto">自动识别</option>
+                    {PLATFORM_PRESETS.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                  </select>
+                  <span className="text-muted">按平台常见列名快速套用，仍可逐列调整</span>
+                </div>
                 <div className="mb-1 text-xs text-muted">把表格列指认到业务字段（「不导入」表示忽略该字段）：</div>
                 <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
                   {(Object.keys(IMPORT_FIELD_LABELS) as ImportFieldKey[]).map((field) => (
@@ -722,7 +750,7 @@ export default function ImportManage() {
                   ))}
                 </div>
                 <div className="mt-2 flex justify-end gap-2">
-                  <Button variant="outline" size="sm" onClick={() => setColMap(buildColumnMap(colHeader))}>还原自动</Button>
+                  <Button variant="outline" size="sm" onClick={() => applyPlatform('auto')}>还原自动</Button>
                   <Button size="sm" disabled={busy} onClick={() => void applyColMap()}>{busy ? '解析中…' : '应用映射'}</Button>
                 </div>
               </div>

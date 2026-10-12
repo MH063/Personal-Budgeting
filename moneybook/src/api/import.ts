@@ -3,7 +3,9 @@ import { execute, runInTransaction, select } from './db';
 import { currentLedgerId } from '@/lib/ledger';
 import { listAccounts } from '@/api/accounts';
 import { listCategories } from '@/api/categories';
-import { categorizeByRule, loadUserRules } from './merchantNorm';
+import { loadUserRules } from './merchantNorm';
+import { categorizeWithRules } from './builtinCategory';
+import { classifyBillDirection, cleanAmount, detectSplitColumns } from './billColumns';
 
 /**
  * 导入可产生的交易类型：
@@ -116,24 +118,27 @@ export function matchImportRule(text: string, rules: ImportRule[] = []): ImportR
 }
 
 /**
- * 归类兜底（语义打通）：导入解析收尾时，对尚未指定分类的行应用「归类规则」（文本 → 分类）。
+ * 归类兜底（语义打通）：导入解析收尾时，对尚未指定分类的行依次应用「用户归类规则 → 内置词典」。
  * 背景（历史缺陷）：归类规则原本只在交易录入的 AI 建议环节生效，导入账单时完全不参与，
  * 用户加了「星巴克 => 咖啡」后导入仍不会归到咖啡——同一意图「文本→分类」被拆成两条互不相通的路径。
- * 现统一收口：资金流向规则未给出分类时，再查归类规则；账单自带分类的行保持不动（来源优先级更高）。
+ * 现统一收口：资金流向规则未给出分类时，先查用户归类规则，再查内置词典兜底（未开 AI 也有基础分类）；
+ * 账单自带分类（如支付宝「交易分类」）的行保持不动（来源优先级更高）。
  */
 function applyUserCategoryRules(rows: ImportRow[]): void {
   const rules = loadUserRules();
-  if (!rules.some((r) => r.kind === 'categorize' && r.enabled)) return;
   for (const r of rows) {
     if (r.category) continue;
     // 匹配文本口径与商户归并一致：收款方 + 备注（覆盖商家名与说明描述）
     const text = [r.payee, r.note].filter(Boolean).join(' ');
     if (!text) continue;
-    const hit = categorizeByRule(text, { rules });
+    const hit = categorizeWithRules(text, rules);
     if (hit) {
       r.category = hit.category;
-      // 可解释：在判定依据里补充「分类来自归类规则」，用户可据此修正或删除规则
-      r.basis = r.basis ? `${r.basis}；分类命中${hit.via}` : `分类命中${hit.via}`;
+      // 仅「用户归类规则命中」写入判定依据；内置词典为低置信兜底（通用关键词），
+      // 不写 basis——保持「无自定义规则时 basis 为空」的既有契约，避免污染判定依据文案。
+      if (!hit.builtin) {
+        r.basis = r.basis ? `${r.basis}；分类命中${hit.via}` : `分类命中${hit.via}`;
+      }
     }
   }
 }
@@ -482,17 +487,21 @@ export function parseBillDate(raw: unknown): string {
 /** 别名匹配列下标（容错）：先归一化（去空白/全角/斜杠、转小写）后，表头命中（等于或包含）别名。
  *  例：表头「 金额(元) 」能命中别名「金额」；「收/支」能命中「收支」。
  *  注意：只允许"表头包含别名"单方向，禁止反向 substring——否则别名「收支类型」会误匹配仅写「类型」的列，
- *  导致"非账单模板"被误判为账单（含收支方向列）。 */
-function billColIndex(row: string[], aliases: string[]): number {
-  return row.findIndex((h) => {
-    if (h == null) return false;
+ *  导致"非账单模板"被误判为账单（含收支方向列）。
+ *  @param exclude 可选：需要跳过的列索引（供多字段认领时避免同一列被重复占用） */
+export function billColIndex(row: string[], aliases: string[], exclude?: Set<number>): number {
+  for (let i = 0; i < row.length; i++) {
+    if (exclude?.has(i)) continue;
+    const h = row[i];
+    if (h == null) continue;
     const nh = normalizeHeader(h);
-    if (!nh) return false;
-    return aliases.some((a) => {
+    if (!nh) continue;
+    if (aliases.some((a) => {
       const na = normalizeHeader(a);
       return nh === na || nh.includes(na);
-    });
-  });
+    })) return i;
+  }
+  return -1;
 }
 
 /** 表头/列值归一化：去空白、去斜杠（收/支→收支）、转小写、括号半角化。 */
@@ -501,34 +510,42 @@ function normalizeHeader(s: unknown): string {
 }
 
 /**
- * 查找「账单格式」的表头行：需同时含「交易金额」与「收/支」与「金额」列。
- * 支付宝/微信账单的前若干行为说明/统计，真正的表头行满足该特征。
+ * 查找「账单格式」的表头行：需含「时间」列，且（含「收/支」方向列 或 含借贷/收支**分列**），
+ * 且（含统一「金额」列 或 含分列）。支付宝/微信账单的前若干行为说明/统计，真正的表头行满足该特征。
  * 列为名别名做了扩展，以兼容招商/云闪付/京东/美团/建行等常见平台的字段命名。
- * @returns 表头所在行号 + 各字段列索引；找不到返回 null
+ * @returns 表头所在行号 + 各字段列索引（含分列列下标）；找不到返回 null
  */
 function findBillHeader(aoa: string[][]): { headerIdx: number; cols: Record<string, number> } | null {
-  const timeAliases = ['交易时间', '交易日期', '记账时间', '记账日期', '时间', '日期'];
+  const timeAliases = ['交易时间', '交易日期', '记账时间', '记账日期', '发生日期', '时间', '日期'];
   for (let i = 0; i < aoa.length; i++) {
     const row = aoa[i];
     const time = billColIndex(row, timeAliases);
     if (time === -1) continue;
     const io = billColIndex(row, [
-      '收/支', '收入/支出', '收支', '收支类型', '借贷标志', '借贷方向', '收付标志',
+      '收/支', '收入/支出', '收支', '收支类型', '借贷标志', '借贷方向', '收付标志', '收付方向',
     ]);
-    const amt = billColIndex(row, ['金额', '金额(元)', '金额（元）', '交易金额', '收入金额', '支出金额']);
-    if (io === -1 || amt === -1) continue;
+    const amt = billColIndex(row, ['金额', '金额(元)', '金额（元）', '交易金额', '发生额', '收入金额', '支出金额']);
+    // 借贷/收支分列：表头成对出现「收入金额/支出金额」「借方发生额/贷方发生额」等金额列（银行流水常见）
+    const split = detectSplitColumns(row);
+    const hasSplit = split.incomeCol >= 0 && split.expenseCol >= 0;
+    // 准入：必须有时间列；且（有方向列 或 有分列）；且（有统一金额列 或 有分列）。
+    // 放宽仅针对"有分列"的形态，避免把普通表格（无收支特征）误判为账单。
+    if (io === -1 && !hasSplit) continue;
+    if (amt === -1 && !hasSplit) continue;
     return {
       headerIdx: i,
       cols: {
         time,
-        date: billColIndex(row, ['记账日期', '交易日期', '记账时间', '日期']),
+        date: billColIndex(row, ['记账日期', '交易日期', '记账时间', '发生日期', '日期']),
         io, amt,
+        splitIncome: split.incomeCol,
+        splitExpense: split.expenseCol,
         type: billColIndex(row, ['交易类型', '交易分类', '商品分类', '分类']),
         peer: billColIndex(row, ['交易对方', '对方户名', '商户名称', '商家名称', '收款方', '交易对方名称', '对方账户']),
         goods: billColIndex(row, ['商品', '商品说明', '商品名称', '物品', '用途']),
         channel: billColIndex(row, ['支付方式', '收/付款方式', '付款方式', '付款账户', '扣款账户', '出账账户', '资金来源', '资金渠道', '收付款方式', '账户名称']),
         status: billColIndex(row, ['当前状态', '交易状态', '状态', '交易状态查询']),
-        orderNo: billColIndex(row, ['交易单号', '交易订单号', '订单号', '流水号', '交易号', '流水']),
+        orderNo: billColIndex(row, ['交易单号', '交易订单号', '订单号', '流水号', '交易号', '流水', '凭证号']),
         merchantNo: billColIndex(row, ['商户单号', '商家订单号', '商户订单号', '专柜单号']),
         note: billColIndex(row, ['备注', '摘要', '描述', '附言']),
       },
@@ -559,7 +576,11 @@ export function parseBillAOA(aoa: unknown[][], rules: ImportRule[] = []): { rows
   // 公共解析（金额/日期/账户/分类/备注等），供成功与跳过行共用
   const parseCommon = (row: string[], lineNo: number): Omit<ImportRow, 'type'> => {
     const v = get(row);
-    const amount = Math.abs(parseFloat(String(v(cols.amt)).replace(/[,，元\s]/g, '')) || 0);
+    // 金额：优先统一金额列；该列为空/0 时回退到「借贷分列」的收入侧或支出侧列（银行流水常见）
+    let amount = cleanAmount(v(cols.amt));
+    if (!(amount > 0) && cols.splitIncome >= 0 && cols.splitExpense >= 0) {
+      amount = cleanAmount(v(cols.splitIncome)) || cleanAmount(v(cols.splitExpense));
+    }
     const time = v(cols.time);
     const date = (cols.date >= 0 ? parseBillDate(v(cols.date)) || parseBillDate(time) : parseBillDate(time)) || '';
     const channel = v(cols.channel) || '';
@@ -689,9 +710,13 @@ export function parseBillAOA(aoa: unknown[][], rules: ImportRule[] = []): { rows
       continue;
     }
 
-    let type: 'income' | 'expense' | null = null;
-    if (!neutral && /收入|收款|入账|存入|转入|到账/.test(io)) type = 'income';
-    else if (!neutral && /支出|付款|消费|转出|汇款/.test(io)) type = 'expense';
+    // 方向：优先按「收/支 / 借贷标志」列判定（借=支出、贷=收入）；
+    // 未判定出时，再按「借贷分列」哪一侧有值判定（如 借方发生额非空 → 支出）
+    let type: 'income' | 'expense' | null = classifyBillDirection(io);
+    if (!type && !neutral && cols.splitIncome >= 0 && cols.splitExpense >= 0) {
+      if (cleanAmount(v(cols.splitIncome)) > 0) type = 'income';
+      else if (cleanAmount(v(cols.splitExpense)) > 0) type = 'expense';
+    }
     if (!type) {
       const reason = `收支方向为「${io || '空'}」`;
       skipped.push(`第${lineNo}行：${reason}，已跳过`);

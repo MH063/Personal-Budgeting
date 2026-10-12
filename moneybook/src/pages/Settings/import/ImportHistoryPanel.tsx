@@ -25,6 +25,9 @@ export default function ImportHistoryPanel({ logs, onRestoreSkips }: ImportHisto
   const [skipView, setSkipView] = useState<{ log: ImportLog; skips: ImportSkip[]; loading: boolean } | null>(null);
   // 「补导入」二次确认：批量还原跳过数据为待导入行前先确认，避免误触加入大量行
   const [restoreConfirmOpen, setRestoreConfirmOpen] = useState(false);
+  // 「一键补导入全部跳过行」：汇总所有历史记录的跳过明细前先确认；busy 防重复点击
+  const [restoreAllConfirm, setRestoreAllConfirm] = useState(false);
+  const [restoreAllBusy, setRestoreAllBusy] = useState(false);
 
   if (logs.length === 0) return null;
 
@@ -40,10 +43,43 @@ export default function ImportHistoryPanel({ logs, onRestoreSkips }: ImportHisto
     }
   }
 
+  /** 一键补导入：汇总所有历史记录中持久化的跳过明细，一次还原为待导入行（仍需在预览中核对后导入） */
+  async function restoreAllSkips() {
+    setRestoreAllBusy(true);
+    try {
+      const all: ImportSkip[] = [];
+      for (const log of logs) {
+        if (!(log.skipped > 0)) continue;
+        try {
+          const skips = await listImportSkips(log.id);
+          all.push(...skips);
+        } catch { /* 单条历史读取失败忽略，其余照常汇总 */ }
+      }
+      if (!all.length) {
+        toast.error('没有可补导入的跳过明细');
+        setRestoreAllConfirm(false);
+        return;
+      }
+      const ok = onRestoreSkips(all);
+      if (ok) setRestoreAllConfirm(false);
+    } finally {
+      setRestoreAllBusy(false);
+    }
+  }
+
+  const totalSkipped = logs.reduce((s, h) => s + (h.skipped || 0), 0);
+
   return (
     <>
       <div className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-4">
-        <h3 className="mb-2 font-semibold">导入历史</h3>
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+          <h3 className="font-semibold">导入历史</h3>
+          {totalSkipped > 0 && (
+            <Button size="sm" variant="outline" disabled={restoreAllBusy} onClick={() => setRestoreAllConfirm(true)}>
+              {restoreAllBusy ? '汇总中…' : `一键补导入全部跳过行（${totalSkipped}）`}
+            </Button>
+          )}
+        </div>
         <div className="max-h-64 overflow-auto">
           <table className="w-full text-xs">
             <thead className="sticky top-0 bg-black/5 text-left text-muted dark:bg-white/5">
@@ -161,6 +197,16 @@ export default function ImportHistoryPanel({ logs, onRestoreSkips }: ImportHisto
           if (ok) setSkipView(null);
         }}
         onClose={() => setRestoreConfirmOpen(false)}
+      />
+
+      {/* 一键补导入全部跳过行：汇总所有历史记录中持久化的跳过明细，二次确认后一次性还原为待导入行 */}
+      <ConfirmDialog
+        open={restoreAllConfirm}
+        title="一键补导入全部跳过行"
+        description={`将汇总所有导入历史中持久化的 ${totalSkipped} 条跳过数据，还原为待导入行并加入导入预览列表（清除跳过标记，按原始字段恢复日期/金额/账户等）。它们不会直接进入账本，请在预览中核对修正后点击「开始导入」完成入库。确定补导入吗？`}
+        confirmText="确认补导入"
+        onConfirm={() => void restoreAllSkips()}
+        onClose={() => setRestoreAllConfirm(false)}
       />
     </>
   );

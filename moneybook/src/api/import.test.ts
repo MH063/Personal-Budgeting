@@ -333,6 +333,31 @@ describe('parseBillAOA：非账单格式不误判', () => {
   });
 });
 
+describe('parseBillAOA：借贷 / 收支分列账单', () => {
+  it('借贷标志 + 收入金额/支出金额 分列：按非空侧判定方向与金额', () => {
+    const aoa: unknown[][] = [
+      ['交易日期', '借贷标志', '收入金额', '支出金额', '对方户名', '摘要'],
+      ['2026-09-01', '借', '', '35.50', '某便利店', '买菜'],
+      ['2026-09-02', '贷', '8000', '', '某某公司', '工资'],
+    ];
+    const res = parseBillAOA(aoa);
+    expect(res.detected).toBe(true);
+    expect(res.rows).toHaveLength(2);
+    expect(res.rows[0]).toMatchObject({ type: 'expense', amount: 35.5, payee: '某便利店' });
+    expect(res.rows[1]).toMatchObject({ type: 'income', amount: 8000, payee: '某某公司' });
+  });
+
+  it('无统一金额列、仅分列（借方发生额/贷方发生额）时也能识别', () => {
+    const aoa: unknown[][] = [
+      ['交易日期', '借方发生额', '贷方发生额', '摘要'],
+      ['2026-09-03', '120', '', '话费充值'],
+    ];
+    const res = parseBillAOA(aoa);
+    expect(res.detected).toBe(true);
+    expect(res.rows[0]).toMatchObject({ type: 'expense', amount: 120 });
+  });
+});
+
 describe('parseBillAOA：表头列名容错', () => {
   it('表头用词/写法变化仍能识别并映射', () => {
     // 「交易时间」带空格全角、金额带括号、支付的列名改动、单号别名 → 均应容错命中
