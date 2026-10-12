@@ -22,9 +22,11 @@ export default function AiAssistant() {
           <div className="font-semibold">🤖 AI 助手（统一入口）</div>
           <div className="text-sm text-muted">
             问答对话、月度报告、省钱建议、财务体检、下月预测、预算建议与自然语言记账，统一在弹窗中进行；
+            {/* 文案与真实行为对齐：store 在未开启 AI 或凭证缺失时会拦截打开，
+                因此这里不再承诺「未开启也可用本地问答」，改为如实告知需先开启配置 */}
             {enabled
               ? '已开启 AI：自动接入，仅上送脱敏聚合事实，不含单笔明细。'
-              : '未开启 AI 时仍可用本地规则问答，不影响其他功能。'}
+              : '需先在「设置 → AI 助手」中开启并配置凭证，才能打开使用。'}
           </div>
         </div>
         <div className="flex items-center gap-2">

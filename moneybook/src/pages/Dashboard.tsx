@@ -95,7 +95,8 @@ export default function Dashboard() {
               const st = severityStyles(r.severity as TodoItem['severity']);
               return (
                 <div key={i} className="flex items-start gap-2 rounded-lg border px-3 py-2 text-sm" style={{ borderColor: st.border, background: st.bg }}>
-                  <span>{r.severity === 'danger' ? '⚠️' : r.severity === 'warning' ? '🁢' : '💡'}</span>
+                  {/* 严重=⛔、警告=⚠️、提示=💡：修正此前 warning 误用了无意义字符 🁢 */}
+                  <span>{r.severity === 'danger' ? '⛔' : r.severity === 'warning' ? '⚠️' : '💡'}</span>
                   <div className="min-w-0">
                     <div className="truncate font-medium" style={{ color: st.color }}>{r.title}</div>
                     <div className="truncate text-xs text-muted">{r.detail}</div>

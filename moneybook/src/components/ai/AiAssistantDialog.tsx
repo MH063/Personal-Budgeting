@@ -152,9 +152,11 @@ export default function AiAssistantDialog() {
           ) : (
             <div className="rounded-xl border border-dashed border-white/15 p-4">
               <div className="font-semibold" style={{ color: '#e4e4e7' }}>🤖 自然语言记账需要先开启 AI</div>
+              {/* 覆盖面兜底文案：store 未开启时会拦截打开，此分支通常不可达；
+                  故删除「未开启仍可用本地问答」等不实承诺，只说明开启后的能力 */}
               <div className="mt-1 text-sm" style={{ color: '#a1a1aa' }}>
                 开启并配置凭证后，可直接输入「午饭 25 元 用微信支付」等语句自动解析成账。
-                未开启 AI 不影响手动记账与本地问答（左侧「对话 / 报告」Tab 的快捷问答始终可用）。
+                请先在「设置 → AI 助手」完成开关开启与凭证配置。
               </div>
               <Link to="/settings?tab=ai" onClick={close} className="mt-2 inline-block text-sm" style={{ color: 'var(--color-primary-fg)' }}>去开启 →</Link>
             </div>

@@ -5,6 +5,7 @@ import { useQuery } from '@tanstack/react-query';
 import { useUIStore } from '@/stores/useUIStore';
 import { useFilterStore } from '@/stores/useFilterStore';
 import { listTransactionsDetailed, type Transaction } from '@/api/transactions';
+import { listCategories } from '@/api/categories';
 import { TX_TYPES } from '@/lib/constants';
 import { formatMoney, formatDate } from '@/lib/format';
 
@@ -50,9 +51,29 @@ export default function CommandPalette() {
     enabled: keyword.length > 0,
   });
 
+  // 分类搜索：placeholder 承诺可搜「分类」，此前未实现。这里拉取全部分类后按名称本地过滤，
+  // 结果可直达「设置 → 分类」管理页；queryKey 不含关键词，避免每次输入都重新查库。
+  const { data: allCategories = [] } = useQuery({
+    queryKey: ['command-categories'],
+    queryFn: () => listCategories(),
+    enabled: keyword.length > 0,
+  });
+  const catResults = keyword ? allCategories.filter((c) => c.name.includes(keyword)).slice(0, 6) : [];
+
+  // 页面导航：有关键词时按名称/路径过滤，无关键词时展示全部
+  const navResults = keyword
+    ? ITEMS.filter((it) => it.label.includes(keyword) || it.path.includes(keyword))
+    : ITEMS;
+
   function goTransaction(tx: Transaction) {
     setQuickSearch(tx.note || (TX_TYPES[tx.type]?.label ?? ''));
     navigate(pageOf(tx));
+    setOpen(false);
+  }
+
+  /** 跳转到分类管理页（设置页「分类与标签」分组） */
+  function goCategory() {
+    navigate('/settings?tab=category');
     setOpen(false);
   }
 
@@ -71,15 +92,36 @@ export default function CommandPalette() {
           <Command.List className="max-h-80 overflow-y-auto p-2">
             <Command.Empty className="p-4 text-center text-muted">无结果</Command.Empty>
 
-            {!keyword && (
-              <Command.Group heading="导航">
-                {ITEMS.map((it) => (
+            {/* 页面导航：无关键词展示全部，有关键词按名称/路径过滤（与分类、交易结果并列） */}
+            {navResults.length > 0 && (
+              <Command.Group heading="页面">
+                {navResults.map((it) => (
                   <Command.Item
                     key={it.path}
                     onSelect={() => { navigate(it.path); setOpen(false); }}
                     className="cursor-pointer rounded px-3 py-2 hover:bg-black/5 dark:hover:bg-white/5"
                   >
                     {it.label}
+                  </Command.Item>
+                ))}
+              </Command.Group>
+            )}
+
+            {/* 分类结果：点击直达「设置 → 分类」管理页 */}
+            {catResults.length > 0 && (
+              <Command.Group heading={`分类（${catResults.length}）· 点击前往分类管理`}>
+                {catResults.map((c) => (
+                  <Command.Item
+                    key={`cat-${c.id}`}
+                    value={`cat-${c.id}`}
+                    onSelect={goCategory}
+                    className="flex cursor-pointer items-center gap-2 rounded px-3 py-2 hover:bg-black/5 dark:hover:bg-white/5"
+                  >
+                    <span>{c.icon}</span>
+                    <span className="min-w-0 truncate">{c.name}</span>
+                    <span className="ml-auto shrink-0 rounded-full bg-black/5 px-2 py-0.5 text-xs text-muted dark:bg-white/10">
+                      {c.type === 'income' ? '收入' : '支出'}
+                    </span>
                   </Command.Item>
                 ))}
               </Command.Group>
@@ -105,20 +147,6 @@ export default function CommandPalette() {
                     <span className={`shrink-0 font-medium ${['income', 'borrow', 'repay_in'].includes(tx.type) ? 'text-[var(--color-success)]' : tx.type === 'transfer' ? 'text-muted' : 'text-[var(--color-danger)]'}`}>
                       {['income', 'borrow', 'repay_in'].includes(tx.type) ? '+' : tx.type === 'transfer' ? '±' : '-'} ¥{formatMoney(tx.amount)}
                     </span>
-                  </Command.Item>
-                ))}
-              </Command.Group>
-            )}
-
-            {keyword && txResults.length === 0 && keyword.length > 0 && (
-              <Command.Group heading="导航">
-                {ITEMS.filter((it) => it.label.includes(keyword) || it.path.includes(keyword)).map((it) => (
-                  <Command.Item
-                    key={it.path}
-                    onSelect={() => { navigate(it.path); setOpen(false); }}
-                    className="cursor-pointer rounded px-3 py-2 hover:bg-black/5 dark:hover:bg-white/5"
-                  >
-                    {it.label}
                   </Command.Item>
                 ))}
               </Command.Group>
