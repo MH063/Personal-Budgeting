@@ -6,6 +6,8 @@ import { useUIStore } from '@/stores/useUIStore';
 import { useFilterStore } from '@/stores/useFilterStore';
 import { listTransactionsDetailed, type Transaction } from '@/api/transactions';
 import { listCategories } from '@/api/categories';
+import { listAccounts } from '@/api/accounts';
+import { SETTINGS_TABS } from '@/lib/settingsTabs';
 import { TX_TYPES } from '@/lib/constants';
 import { formatMoney, formatDate } from '@/lib/format';
 
@@ -60,6 +62,17 @@ export default function CommandPalette() {
   });
   const catResults = keyword ? allCategories.filter((c) => c.name.includes(keyword)).slice(0, 6) : [];
 
+  // 账户搜索：与分类同模式——拉取账户列表后本地按名称过滤，结果直达「设置 → 账户管理」
+  const { data: allAccounts = [] } = useQuery({
+    queryKey: ['command-accounts'],
+    queryFn: () => listAccounts(),
+    enabled: keyword.length > 0,
+  });
+  const accResults = keyword ? allAccounts.filter((a) => a.name.includes(keyword)).slice(0, 6) : [];
+
+  // 设置项搜索：复用 SETTINGS_TABS 静态清单按名称过滤，直达对应设置分区（无需查库）
+  const settingResults = keyword ? SETTINGS_TABS.filter((t) => t.label.includes(keyword)).slice(0, 6) : [];
+
   // 页面导航：有关键词时按名称/路径过滤，无关键词时展示全部
   const navResults = keyword
     ? ITEMS.filter((it) => it.label.includes(keyword) || it.path.includes(keyword))
@@ -71,9 +84,9 @@ export default function CommandPalette() {
     setOpen(false);
   }
 
-  /** 跳转到分类管理页（设置页「分类与标签」分组） */
-  function goCategory() {
-    navigate('/settings?tab=category');
+  /** 跳转到设置页指定分区（设置页支持 ?tab= 深链，见 lib/settingsTabs） */
+  function goSettings(tab: string) {
+    navigate(`/settings?tab=${tab}`);
     setOpen(false);
   }
 
@@ -107,14 +120,14 @@ export default function CommandPalette() {
               </Command.Group>
             )}
 
-            {/* 分类结果：点击直达「设置 → 分类」管理页 */}
+            {/* 分类结果：点击直达「设置 → 分类管理」 */}
             {catResults.length > 0 && (
               <Command.Group heading={`分类（${catResults.length}）· 点击前往分类管理`}>
                 {catResults.map((c) => (
                   <Command.Item
                     key={`cat-${c.id}`}
                     value={`cat-${c.id}`}
-                    onSelect={goCategory}
+                    onSelect={() => goSettings('category')}
                     className="flex cursor-pointer items-center gap-2 rounded px-3 py-2 hover:bg-black/5 dark:hover:bg-white/5"
                   >
                     <span>{c.icon}</span>
@@ -122,6 +135,42 @@ export default function CommandPalette() {
                     <span className="ml-auto shrink-0 rounded-full bg-black/5 px-2 py-0.5 text-xs text-muted dark:bg-white/10">
                       {c.type === 'income' ? '收入' : '支出'}
                     </span>
+                  </Command.Item>
+                ))}
+              </Command.Group>
+            )}
+
+            {/* 账户结果：点击直达「设置 → 账户管理」 */}
+            {accResults.length > 0 && (
+              <Command.Group heading={`账户（${accResults.length}）· 点击前往账户管理`}>
+                {accResults.map((a) => (
+                  <Command.Item
+                    key={`acc-${a.id}`}
+                    value={`acc-${a.id}`}
+                    onSelect={() => goSettings('account')}
+                    className="flex cursor-pointer items-center gap-2 rounded px-3 py-2 hover:bg-black/5 dark:hover:bg-white/5"
+                  >
+                    <span>{a.icon}</span>
+                    <span className="min-w-0 truncate">{a.name}</span>
+                    <span className="ml-auto shrink-0 text-xs text-muted">¥{formatMoney(a.balance)}</span>
+                  </Command.Item>
+                ))}
+              </Command.Group>
+            )}
+
+            {/* 设置项结果：静态清单本地过滤，直达对应设置分区 */}
+            {settingResults.length > 0 && (
+              <Command.Group heading={`设置（${settingResults.length}）`}>
+                {settingResults.map((t) => (
+                  <Command.Item
+                    key={`set-${t.key}`}
+                    value={`set-${t.key}`}
+                    onSelect={() => goSettings(t.key)}
+                    className="flex cursor-pointer items-center gap-2 rounded px-3 py-2 hover:bg-black/5 dark:hover:bg-white/5"
+                  >
+                    <span>{t.icon}</span>
+                    <span className="min-w-0 truncate">{t.label}</span>
+                    <span className="ml-auto shrink-0 text-xs text-muted">设置 →</span>
                   </Command.Item>
                 ))}
               </Command.Group>
