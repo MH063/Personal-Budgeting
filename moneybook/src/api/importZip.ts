@@ -1,4 +1,5 @@
 import { unzipSync, zipSync, inflateSync, type UnzipOptions } from 'fflate';
+import { parseAesExtra, decryptWinZipAes } from './zipAes';
 
 /**
  * 加密账单本地解密模块。
@@ -11,7 +12,8 @@ import { unzipSync, zipSync, inflateSync, type UnzipOptions } from 'fflate';
  *    fflate 对带 data descriptor（flags bit3）的真实银行账单 zip 的 zipcrypto 支持有缺陷——
  *    它不校验 12 字节加密头、也不按中央目录定位真实数据偏移，导致"密码正确却解出乱码/报 invalid distance"。
  *    自实现按规范处理：12 字节头校验 + CRC 高位定密 + 中央目录定位，密码正确即能稳定解开。
- *  - WinZip AES：加密方式非 zipcrypto，本机无法解，前端仅识别并引导明文导出。
+ *  - WinZip AES：加密方式为 AES-CTR（方法 99），走 zipAes 模块解密（异步，见 tryExtractZipAsync）。
+ *    因需 Web Crypto（PBKDF2 / AES / HMAC），与同步路径分离；运行环境不支持时提示改为明文导出。
  *
  * 特别说明（微信 xlsx 账单的两种形态）：
  *  - 明文 xlsx 在文件层面其实就是 zip；加密账单往往是「加密 xlsx」（zip 内套完整的 xlsx 结构）。
@@ -146,7 +148,7 @@ function zipDecrypt(cipher: Uint8Array, password: string): Uint8Array {
 }
 
 /** 中央目录条目信息 */
-interface CentralEntry { name: string; method: number; offset: number; compSize: number; encrypted: boolean; flags: number; crc: number; timeHighByte: number }
+interface CentralEntry { name: string; method: number; offset: number; compSize: number; encrypted: boolean; flags: number; crc: number; timeHighByte: number; extra: Uint8Array }
 
 /** 从 zip 二进制解析中央目录，返回所有条目。找不到返回空数组。 */
 function readCentralDirectory(buf: Uint8Array): CentralEntry[] {
@@ -176,6 +178,8 @@ function readCentralDirectory(buf: Uint8Array): CentralEntry[] {
     // MS-DOS time 高字节（bit 4-7），zipcrypto 校验用
     const timeHighByte = (time >> 8) & 0xff;
     const nameRaw = buf.subarray(p + 46, p + 46 + nameLen);
+    // 额外字段原样保留：WinZip AES 的 0x9901（强度/实际压缩方法）只在额外字段里，解密时必需
+    const extra = buf.subarray(p + 46 + nameLen, p + 46 + nameLen + extLen);
     // 文件名编码：若设 UTF-8 flag(bit11) 用 UTF-8，否则用 GBK（中文账单文件名常为 GBK）
     let name: string;
     const utf8Flag = (flags & 0x800) !== 0;
@@ -183,7 +187,7 @@ function readCentralDirectory(buf: Uint8Array): CentralEntry[] {
     else {
       try { name = new TextDecoder('gbk').decode(nameRaw); } catch { name = new TextDecoder('utf-8').decode(nameRaw); }
     }
-    entries.push({ name, method, offset, compSize, encrypted: (flags & 1) === 1, flags, crc, timeHighByte });
+    entries.push({ name, method, offset, compSize, encrypted: (flags & 1) === 1, flags, crc, timeHighByte, extra });
     p += 46 + nameLen + extLen + commentLen;
   }
   return entries;
@@ -258,4 +262,63 @@ export function tryExtractZip(buf: Uint8Array, password: string): ExtractResult 
   // 解压后体积上限（store 分支受原始文件上限约束，此处统一兜底）
   if (payload.length > MAX_EXTRACT_TOTAL_BYTES) return { ok: false, reason: 'too_large' };
   return { ok: true, name: first.name, data: payload };
+}
+
+/**
+ * 用密码解压 zip（异步版，支持 WinZip AES）。
+ *
+ * 与同步 tryExtractZip 的关系：
+ *  - 明文 / zipcrypto 加密：直接委托同步实现（逻辑完全一致，避免同一套解析重复维护）；
+ *  - WinZip AES：需 Web Crypto（PBKDF2 / AES-ECB / HMAC），只能异步，故单列此入口。
+ * 返回值语义与 tryExtractZip 完全一致，调用方可无差别处理。
+ */
+export async function tryExtractZipAsync(buf: Uint8Array, password: string): Promise<ExtractResult> {
+  if (buf.length > MAX_ZIP_INPUT_BYTES) return { ok: false, reason: 'too_large' };
+  const kind = detectZipEncryption(buf);
+  // 非 AES（明文或 zipcrypto）：同步路径已完整覆盖
+  if (!kind?.aes) return tryExtractZip(buf, password);
+
+  const entries = readCentralDirectory(buf);
+  if (entries.length > MAX_ZIP_ENTRIES) return { ok: false, reason: 'too_large' };
+  const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+  const files: Record<string, Uint8Array> = {};
+  let total = 0;
+  let sawFile = false;
+  for (const e of entries) {
+    if (e.name.endsWith('/')) continue; // 目录条目跳过
+    sawFile = true;
+    const aes = parseAesExtra(e.extra);
+    if (!aes) return { ok: false, reason: 'unsupported' };
+    // 定位条目数据区：本地文件头 30 字节 + 文件名长 + 额外字段长；
+    // 压缩大小以中央目录为准（data descriptor 下本地头该字段为 0）。
+    if (buf[e.offset] !== 0x50 || buf[e.offset + 1] !== 0x4b || buf[e.offset + 2] !== 0x03 || buf[e.offset + 3] !== 0x04) {
+      return { ok: false, reason: 'corrupt' };
+    }
+    const fnLen = view.getUint16(e.offset + 26, true);
+    const extLen = view.getUint16(e.offset + 28, true);
+    const dataStart = e.offset + 30 + fnLen + extLen;
+    const dataEnd = dataStart + e.compSize;
+    if (dataEnd > buf.length || dataStart >= buf.length) return { ok: false, reason: 'corrupt' };
+    const r = decryptWinZipAes(buf.subarray(dataStart, dataEnd), password, aes);
+    if (!r.ok) return { ok: false, reason: r.reason };
+    total += r.plain.length;
+    if (total > MAX_EXTRACT_TOTAL_BYTES) return { ok: false, reason: 'too_large' };
+    files[e.name] = r.plain;
+  }
+  if (!sawFile) return { ok: false, reason: 'corrupt' };
+
+  // 与同步路径同口径：若解出的是完整 xlsx 结构，重打包为 SheetJS 可直接读取的 .xlsx
+  if (zipIsXlsxStructure(files)) {
+    // eslint-disable-next-line no-console
+    console.log('[importZip] WinZip AES 解密成功（xlsx 结构），条目数：', Object.keys(files).length);
+    return { ok: true, name: '解压后的账单.xlsx', data: repackXlsxEntries(files) };
+  }
+  const en = Object.entries(files).find(([n]) => !n.endsWith('/'));
+  if (!en) return { ok: false, reason: 'corrupt' };
+  // 文本乱码兜底：与同步路径同口径，避免错误密码产出乱码文本被当作有效账单
+  const ratio = /\.(csv|txt)$/i.test(en[0]) ? textPlausibilityRatio(en[1]) : null;
+  if (ratio != null && ratio > 0.2) return { ok: false, reason: 'bad_password' };
+  // eslint-disable-next-line no-console
+  console.log('[importZip] WinZip AES 解密成功：', en[0], `${en[1].length} bytes`);
+  return { ok: true, name: en[0], data: en[1] };
 }

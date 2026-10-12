@@ -9,7 +9,7 @@ import {
 } from '@/api/import';
 import { loadImportRules, saveImportRules, pickRuleKeyword, shouldLearnCorrection, learnRuleFromCorrection, type LearnedRuleCandidate } from '@/api/importRules';
 import { recalcAccountBalances, updateTransaction } from '@/api/transactions';
-import { isZip, tryExtractZip, detectZipEncryption } from '@/api/importZip';
+import { isZip, tryExtractZipAsync, detectZipEncryption } from '@/api/importZip';
 import { recordImportLog, listImportLogs, listImportSkips, type ImportLog, type ImportSkip } from '@/api/importLog';
 import { recordAudit } from '@/api/audit';
 import { suggestForText } from '@/api/aiSuggest';
@@ -228,14 +228,9 @@ export default function ImportManage() {
           fileIdx++;
           continue;
         }
-        // zip：判断加密方式与解压
+        // zip：识别加密方式（明文 / zipcrypto / WinZip AES 均由 tryExtractZipAsync 统一处理）
         const kind = detectZipEncryption(binary);
-        if (kind?.aes) {
-          allWarn.push(`「${file.name}」使用 WinZip AES 加密，本机暂不支持直接解密。请到导出端选择「明文」或「zip 密码版」重新导出。`);
-          fileIdx++;
-          continue;
-        }
-        const ex = tryExtractZip(binary, pwd);
+        const ex = await tryExtractZipAsync(binary, pwd);
         if (ex.ok) {
           const r = await parseSourceFile(ex.name, ex.data, files.length);
           if (r) {
@@ -285,8 +280,7 @@ export default function ImportManage() {
     setPwdModal(null);
     try {
       const binary = new Uint8Array(await file.arrayBuffer());
-      const kind = detectZipEncryption(binary);
-      const ex = tryExtractZip(binary, text);
+      const ex = await tryExtractZipAsync(binary, text);
       if (!ex.ok) {
         // 密码仍错 → 保留对话框让你继续改
         setPwdModal({ file, text, error: '解压失败：密码不正确，请重试。' });

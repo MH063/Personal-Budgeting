@@ -6,7 +6,9 @@
  */
 import { describe, it, expect } from 'vitest';
 import { zipSync, strFromU8, strToU8 } from 'fflate';
-import { isZip, extractFromZipWithPassword, detectZipEncryption, zipIsXlsxStructure } from './importZip';
+import { pbkdf2Sync, createCipheriv, createHmac, randomBytes } from 'node:crypto';
+import { deflateRawSync } from 'node:zlib';
+import { isZip, extractFromZipWithPassword, detectZipEncryption, zipIsXlsxStructure, tryExtractZipAsync } from './importZip';
 
 /** 构造一个仅含本地文件头、可设定"加密位 + AES extra 字段"的字节（用于检测逻辑，不构成可解压 zip） */
 function makeHeaderBuf(opts: { encryptBit?: boolean; aesExtra?: boolean; method?: number }): Uint8Array {
@@ -104,5 +106,112 @@ describe('extractFromZipWithPassword：解压', () => {
     expect(ex!.name.endsWith('.xlsx')).toBe(true);   // 返回的是完整 xlsx，而非单个元数据条目
     // 重打包后的 data 是完整 zip 字节，可直接被 SheetJS 读取（长度 > 单个元数据条目）
     expect(ex!.data.length).toBeGreaterThan(zipSync(files).length * 0.9);
+  });
+});
+
+/**
+ * 用 Node 原生 crypto（OpenSSL 实现）构造一个真实的 WinZip AES 加密 zip。
+ * 关键点：AES-CTR 计数块按 WinZip 规范「以 16 字节小端、从 1 起逐块 +1」，
+ * 因此这里不能用 openssl 的常规 aes-ctr（大端计数），而是用 AES-ECB 自行生成密钥流。
+ * 目的：用完全独立的实现生成夹具，交叉验证 zipAes.ts 的自实现，而非自证自明。
+ */
+function buildAesZip(name: string, content: string, password: string, strength: 1 | 2 | 3 = 3): Uint8Array {
+  const keyLen = strength === 1 ? 16 : strength === 2 ? 24 : 32;
+  const salt = randomBytes(keyLen / 2);
+  const derived = pbkdf2Sync(Buffer.from(password, 'utf8'), salt, 1000, keyLen * 2 + 2, 'sha1');
+  const aesKey = derived.subarray(0, keyLen);
+  const macKey = derived.subarray(keyLen, keyLen * 2);
+  const verifier = derived.subarray(keyLen * 2, keyLen * 2 + 2);
+
+  const raw = Buffer.from(content, 'utf8');
+  const compressed = deflateRawSync(raw);
+  // AES-CTR：16 字节小端计数器，从 1 开始
+  const blocks = Math.ceil(compressed.length / 16);
+  const counters = Buffer.alloc(blocks * 16);
+  for (let i = 0; i < blocks; i++) counters.writeUIntLE(i + 1, i * 16, 6);
+  const ecb = createCipheriv(`aes-${keyLen * 8}-ecb`, aesKey, null);
+  ecb.setAutoPadding(false);
+  const keystream = Buffer.concat([ecb.update(counters), ecb.final()]);
+  const cipherText = Buffer.alloc(compressed.length);
+  for (let i = 0; i < compressed.length; i++) cipherText[i] = compressed[i] ^ keystream[i];
+  // AE-2：认证码覆盖密文，取 HMAC-SHA1 前 10 字节
+  const authCode = createHmac('sha1', macKey).update(cipherText).digest().subarray(0, 10);
+
+  const entryData = Buffer.concat([salt, verifier, cipherText, authCode]);
+  const nameBuf = Buffer.from(name, 'utf8');
+  // 0x9901：version(2) + "AE"(2) + strength(1) + 实际压缩方法(2)
+  const extra = Buffer.alloc(11);
+  extra.writeUInt16LE(0x9901, 0);
+  extra.writeUInt16LE(7, 2);
+  extra.writeUInt16LE(2, 4);
+  extra.write('AE', 6, 'ascii');
+  extra[8] = strength;
+  extra.writeUInt16LE(8, 9);
+
+  const local = Buffer.alloc(30 + nameBuf.length + extra.length);
+  local.writeUInt32LE(0x04034b50, 0);
+  local.writeUInt16LE(51, 4);
+  local.writeUInt16LE(0x0001, 6); // 加密位
+  local.writeUInt16LE(99, 8); // 方法 99 = WinZip AES
+  local.writeUInt32LE(entryData.length, 18);
+  local.writeUInt32LE(raw.length, 22);
+  local.writeUInt16LE(nameBuf.length, 26);
+  local.writeUInt16LE(extra.length, 28);
+  nameBuf.copy(local, 30);
+  extra.copy(local, 30 + nameBuf.length);
+
+  const cd = Buffer.alloc(46 + nameBuf.length + extra.length);
+  cd.writeUInt32LE(0x02014b50, 0);
+  cd.writeUInt16LE(51, 4);
+  cd.writeUInt16LE(51, 6);
+  cd.writeUInt16LE(0x0001, 8);
+  cd.writeUInt16LE(99, 10);
+  cd.writeUInt32LE(entryData.length, 20);
+  cd.writeUInt32LE(raw.length, 24);
+  cd.writeUInt16LE(nameBuf.length, 28);
+  cd.writeUInt16LE(extra.length, 30);
+  cd.writeUInt32LE(0, 42); // 本地头偏移
+  nameBuf.copy(cd, 46);
+  extra.copy(cd, 46 + nameBuf.length);
+
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0);
+  eocd.writeUInt16LE(1, 8);
+  eocd.writeUInt16LE(1, 10);
+  eocd.writeUInt32LE(cd.length, 12);
+  eocd.writeUInt32LE(local.length + entryData.length, 16);
+
+  return new Uint8Array(Buffer.concat([local, entryData, cd, eocd]));
+}
+
+describe('WinZip AES 解密（tryExtractZipAsync）', () => {
+  it('AES-256（AE-2）：正确密码解出明文，错误密码判定为 bad_password', async () => {
+    const zip = buildAesZip('bill.csv', '交易时间,金额\n2026-09-01,35.5', 'p@ss1234');
+    expect(detectZipEncryption(zip)?.aes).toBe(true);
+
+    const ok = await tryExtractZipAsync(zip, 'p@ss1234');
+    expect(ok.ok).toBe(true);
+    if (ok.ok) {
+      expect(ok.name).toBe('bill.csv');
+      expect(strFromU8(ok.data)).toContain('35.5');
+    }
+
+    const bad = await tryExtractZipAsync(zip, 'wrong-pass');
+    expect(bad.ok).toBe(false);
+    if (!bad.ok) expect(bad.reason).toBe('bad_password');
+  });
+
+  it('AES-128（strength=1）：盐长度与密钥长度随强度变化后仍可解', async () => {
+    const zip = buildAesZip('a.csv', 'a,b\n1,2', 'pw', 1);
+    const r = await tryExtractZipAsync(zip, 'pw');
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(strFromU8(r.data)).toContain('1,2');
+  });
+
+  it('非 AES 的明文 zip：异步入口委托同步实现，结果一致', async () => {
+    const zip = makeZip('bill.csv', 'a,b\n1,2');
+    const r = await tryExtractZipAsync(zip, '');
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(strFromU8(r.data)).toContain('1,2');
   });
 });
