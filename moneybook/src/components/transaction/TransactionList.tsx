@@ -121,7 +121,7 @@ export default function TransactionList({ type, onEdit }: { type?: string; onEdi
     // 导出纯数值（非带 ¥ 的格式化字符串），便于再导入或表格软件做数值计算/排序。
     // 金额列带符号反映对净资产的影响（收入 +、支出/借出/还出 -、转账 0），
     // 另设独立的收入/支出列，方便按方向筛选汇总。
-    downloadCSV(
+    const saved = await downloadCSV(
       `交易记录_${new Date().toISOString().slice(0, 10)}.csv`,
       ['日期', '类型', '分类', '账户', '备注', '支付时间', '付款方式', '收款方全称', '订单号', '商家订单号', '金额', '收入', '支出'],
       rows.map((r) => [
@@ -142,7 +142,11 @@ export default function TransactionList({ type, onEdit }: { type?: string; onEdi
         ['expense', 'lend', 'repay_out'].includes(r.type) ? r.amount : 0,
       ])
     );
-    toast.success(`已导出 ${rows.length} 条记录`);
+    if (saved) {
+      toast.success(`已导出 ${rows.length} 条记录`);
+    } else {
+      toast.info('已取消导出');
+    }
   }
 
   const columns = [

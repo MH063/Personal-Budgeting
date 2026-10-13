@@ -1,8 +1,23 @@
+import { isTauriRuntime } from './runtime';
+
 /** 导出 CSV（Excel 兼容，含 UTF-8 BOM） */
-export function downloadCSV(filename: string, header: string[], rows: (string | number)[][]) {
+export async function downloadCSV(filename: string, header: string[], rows: (string | number)[][]): Promise<string | null> {
   const esc = (v: unknown) => `"${String(v ?? '').replace(/"/g, '""')}"`;
   const lines = [header.map(esc).join(','), ...rows.map((r) => r.map(esc).join(','))];
   const csv = '\uFEFF' + lines.join('\n');
+  
+  if (isTauriRuntime()) {
+    const { save } = await import('@tauri-apps/plugin-dialog');
+    const { writeTextFile } = await import('@tauri-apps/plugin-fs');
+    const dest = await save({
+      defaultPath: filename,
+      filters: [{ name: 'CSV 文件', extensions: ['csv'] }],
+    });
+    if (!dest) return null;
+    await writeTextFile(dest, csv);
+    return dest;
+  }
+
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -10,6 +25,7 @@ export function downloadCSV(filename: string, header: string[], rows: (string | 
   a.download = filename;
   a.click();
   URL.revokeObjectURL(url);
+  return '已触发下载';
 }
 
 /** 导出 JSON（含缩进，便于人工阅读 / 迁移）。 */

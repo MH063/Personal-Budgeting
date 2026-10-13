@@ -1,4 +1,4 @@
-import { Search, Plus, Moon, Sun, Bot } from 'lucide-react';
+import { Search, Plus, Moon, Sun, Bot, Download, ArrowUpCircle } from 'lucide-react';
 import { useState } from 'react';
 import TransactionForm from '@/components/transaction/TransactionForm';
 import { LedgerSwitcher } from '@/components/layout/LedgerSwitcher';
@@ -6,51 +6,88 @@ import NotificationBell from '@/components/layout/NotificationBell';
 import { useUIStore } from '@/stores/useUIStore';
 import { useAiAssistantStore } from '@/stores/useAiAssistantStore';
 import { useTheme } from '@/hooks/useTheme';
+import { useUpdateStore } from '@/stores/useUpdateStore';
 
 export default function Topbar() {
   const { theme, toggleTheme } = useTheme();
   const [formOpen, setFormOpen] = useState(false);
+  const updatePhase = useUpdateStore((s) => s.phase);
+  const updateInfo = useUpdateStore((s) => s.info);
+  const openUpdateDialog = useUpdateStore((s) => s.openDialog);
 
   return (
     <>
       <header
-        className="flex h-14 items-center gap-3 border-b px-6"
-        style={{ borderColor: 'var(--border)', background: 'var(--card)' }}
+        className="flex h-16 items-center gap-4 border-b px-6 transition-colors duration-300"
+        style={{
+          borderColor: 'var(--border)',
+          background: 'rgba(var(--card-rgb), 0.7)',
+          backdropFilter: 'blur(12px)',
+          WebkitBackdropFilter: 'blur(12px)',
+        }}
       >
         <button
           onClick={() => { useUIStore.getState().setCommandOpen(true); }}
-          className="flex max-w-md flex-1 items-center gap-2 rounded-lg border px-3 py-1.5 text-sm text-muted"
-          style={{ borderColor: 'var(--border)' }}
+          className="group flex max-w-md flex-1 items-center gap-3 rounded-xl border px-4 py-2 text-sm text-muted shadow-sm transition-all hover:border-[var(--color-primary)]/50 hover:bg-[var(--card)] hover:shadow-md"
+          style={{ borderColor: 'var(--border)', background: 'var(--bg)' }}
         >
-          <Search size={14} />
-          <span>搜索功能、分类、交易…</span>
-          <kbd className="ml-auto rounded bg-black/5 px-1.5 py-0.5 text-xs dark:bg-white/10">Ctrl K</kbd>
+          <Search size={16} className="text-muted group-hover:text-[var(--color-primary)]" />
+          <span className="flex-1 text-left">搜索功能、分类、交易…</span>
+          <kbd className="hidden rounded-md border border-[var(--border)] bg-[var(--card)] px-2 py-0.5 text-xs font-medium text-muted shadow-sm sm:inline-block">
+            Ctrl K
+          </kbd>
         </button>
-        <button
-          onClick={() => setFormOpen(true)}
-          className="flex items-center gap-1 rounded-lg px-3 py-1.5 text-sm text-white hover:opacity-90"
-          style={{ background: 'var(--color-primary)' }}
-        >
-          <Plus size={14} /> 记一笔
-        </button>
-        {/* 全局通知中心：逾期借贷 / 预算超支 / 回收站待恢复 / 存储告警 */}
-        <NotificationBell />
-        {/* AI 助手统一入口（弹窗内对话，避免各页面重复嵌入 AI 区块） */}
-        <button
-          onClick={() => useAiAssistantStore.getState().openAssistant()}
-          title="AI 助手"
-          aria-label="AI 助手"
-          className="rounded-lg p-2 hover:bg-black/5 dark:hover:bg-white/5"
-        >
-          <Bot size={16} />
-        </button>
-        <LedgerSwitcher />
-        <button
-          onClick={toggleTheme}
-          className="rounded-lg p-2 hover:bg-black/5 dark:hover:bg-white/5"
-        >
-          {theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />}
-        </button>
+        <div className="flex items-center gap-2 ml-auto">
+          {/* 更新状态指示器 */}
+          {(updatePhase === 'downloading' || updatePhase === 'ready') && (
+            <button
+              onClick={openUpdateDialog}
+              title={updatePhase === 'ready' ? `新版本 V${updateInfo?.version} 已就绪，点击安装` : '更新下载中…'}
+              className={`flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium transition-all ${
+                updatePhase === 'ready'
+                  ? 'bg-[var(--color-success)]/10 text-[var(--color-success)] hover:bg-[var(--color-success)]/20'
+                  : 'bg-[var(--color-primary)]/10 text-[var(--color-primary)] hover:bg-[var(--color-primary)]/20'
+              }`}
+            >
+              {updatePhase === 'downloading' ? (
+                <>
+                  <Download size={14} className="animate-bounce" />
+                  <span>下载中</span>
+                </>
+              ) : (
+                <>
+                  <ArrowUpCircle size={14} className="animate-pulse" />
+                  <span>待重启</span>
+                </>
+              )}
+            </button>
+          )}
+
+          <button
+            onClick={() => setFormOpen(true)}
+            className="flex items-center gap-1.5 rounded-xl px-4 py-2 text-sm font-semibold text-white shadow-md transition-all hover:scale-105 hover:shadow-lg active:scale-95"
+            style={{ background: 'var(--color-primary)' }}
+          >
+            <Plus size={16} strokeWidth={3} /> 记一笔
+          </button>
+          <div className="h-6 w-px bg-[var(--border)] mx-1" />
+          <NotificationBell />
+          <button
+            onClick={() => useAiAssistantStore.getState().openAssistant()}
+            title="AI 助手"
+            aria-label="AI 助手"
+            className="rounded-xl p-2.5 text-muted transition-colors hover:bg-black/5 hover:text-[var(--fg)] dark:hover:bg-white/10"
+          >
+            <Bot size={18} />
+          </button>
+          <LedgerSwitcher />
+          <button
+            onClick={toggleTheme}
+            className="rounded-xl p-2.5 text-muted transition-colors hover:bg-black/5 hover:text-[var(--fg)] dark:hover:bg-white/10"
+          >
+            {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
+          </button>
+        </div>
       </header>
       <TransactionForm open={formOpen} onOpenChange={setFormOpen} />
     </>

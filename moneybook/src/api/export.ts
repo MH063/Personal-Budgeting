@@ -1,5 +1,7 @@
 import { listTransactionsDetailed } from './transactions';
 import { getCategoryDistribution } from './stats';
+import { downloadCSV, downloadText } from '@/lib/export';
+import { isTauriRuntime } from '@/lib/runtime';
 
 const TYPE_MAP: Record<string, string> = {
   income: '收入',
@@ -20,82 +22,23 @@ export interface ExportParams {
   to: string;
 }
 
-function escapeField(v: unknown): string {
-  const s = String(v ?? '');
-  // 含有逗号 / 换行 / 引号 时用双引号包裹并转义内部引号
-  if (/[",\n\r]/.test(s)) {
-    return `"${s.replace(/"/g, '""')}"`;
-  }
-  return s;
-}
-
-function toCsvString(rows: object[]): string {
-  if (!rows.length) return '';
-  const headers = Object.keys(rows[0]);
-  const lines = [headers.map(escapeField).join(',')];
-  for (const row of rows) {
-    lines.push(headers.map((h) => escapeField((row as Record<string, unknown>)[h])).join(','));
-  }
-  const body = lines.join('\r\n');
-  // 含中文或非 ASCII 时加 BOM，兼容 Excel
-  const hasNonAscii = /[^\x00-\x7F]/.test(body);
-  return `${hasNonAscii ? '\uFEFF' : ''}${body}`;
-}
-
-function downloadBlob(content: BlobPart, filename: string, type: string): void {
-  const blob = new Blob([content], { type });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
-}
-
-/**
- * 把对象数组保存为 CSV 文件。
- * 桌面（Tauri）环境：弹系统保存对话框、经 fs 插件写入真实文件（WebView2 中
- * blob + <a download> 触发下载不可靠——历史缺陷：点击导出 CSV 无反应）；
- * 浏览器预览：回退 blob 触发下载。
- * 返回保存路径；用户取消时返回 null。
- */
-export async function toCsv(rows: object[], filename?: string): Promise<string | null> {
-  if (!rows.length) return null;
-  const content = toCsvString(rows);
-  const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
-  if (isTauri) {
-    const { save } = await import('@tauri-apps/plugin-dialog');
-    const { writeTextFile } = await import('@tauri-apps/plugin-fs');
-    const path = await save({
-      defaultPath: filename ?? 'export.csv',
-      filters: [{ name: 'CSV 文件', extensions: ['csv'] }],
-    });
-    if (!path) return null; // 用户取消
-    await writeTextFile(path, content);
-    return path;
-  }
-  downloadBlob(content, filename ?? 'export.csv', 'text/csv;charset=utf-8;');
-  return '已触发下载';
-}
-
 /** 导出交易明细 CSV，返回提示信息 */
 export async function exportToCsv(params: ExportParams): Promise<string> {
   const rows = await listTransactionsDetailed({ from: params.from, to: params.to });
-  const data = rows.map((r) => ({
-    日期: r.date,
-    类型: typeLabel(r.type),
-    金额: r.amount,
-    账户: r.account_name,
-    目标账户: r.to_account_name ?? '',
-    备注: r.note ?? '',
-    分类: r.category_name ?? '',
-  }));
-  // 空数据与「用户取消保存」必须区分：历史缺陷——无记录时 toCsv 返回 null，
-  // 被误报为「已取消导出」，误导用户以为操作被取消。这里提前拦截并明确提示。
+  const data = rows.map((r) => [
+    r.date,
+    typeLabel(r.type),
+    r.amount,
+    r.account_name,
+    r.to_account_name ?? '',
+    r.note ?? '',
+    r.category_name ?? '',
+  ]);
+  
   if (!data.length) return '区间内暂无交易记录，无可导出数据';
-  const saved = await toCsv(data, `transactions_${params.from}_${params.to}.csv`);
+  
+  const headers = ['日期', '类型', '金额', '账户', '目标账户', '备注', '分类'];
+  const saved = await downloadCSV(`transactions_${params.from}_${params.to}.csv`, headers, data);
   if (saved === null) return '已取消导出';
   return `已导出 ${data.length} 条记录${saved === '已触发下载' ? '' : `，文件已保存`}`;
 }
@@ -165,7 +108,7 @@ export async function exportToPdf(params: ExportParams): Promise<string> {
         `${r.date}\t${typeLabel(r.type)}\t${r.amount}\t${r.account_name}\t${r.to_account_name ?? ''}\t${r.note ?? ''}\t${r.category_name ?? ''}`
       ),
     ];
-    downloadBlob(`\uFEFF${lines.join('\n')}`, `report_${params.from}_${params.to}.txt`, 'text/plain;charset=utf-8;');
+    downloadText(`report_${params.from}_${params.to}.txt`, `\uFEFF${lines.join('\n')}`);
     return '已导出 TXT 报表';
   }
 
@@ -231,8 +174,7 @@ export async function exportToPdf(params: ExportParams): Promise<string> {
   // 桌面（Tauri）环境：把报表写入临时文件并用系统默认浏览器打开，
   // 打印/另存为 PDF 的窗口在外部浏览器呈现（历史缺陷：WebView2 内 window.print()
   // 的打印对话框嵌在应用内部，体验不佳）。
-  const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
-  if (isTauri) {
+  if (isTauriRuntime()) {
     try {
       const { invoke } = await import('@tauri-apps/api/core');
       const p = await invoke<string>('open_report_in_browser', { html });

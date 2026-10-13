@@ -21,6 +21,7 @@ import ImportHistoryPanel from './import/ImportHistoryPanel';
 import PreviewDialog from './import/PreviewDialog';
 import PasswordDialog, { type PasswordModalState } from './import/PasswordDialog';
 import { decodeText, type ReconItem } from './import/helpers';
+import { isTauriRuntime } from '@/lib/runtime';
 
 // 表头别名推断已迁移至 import.buildColumnMap（含多字段认领策略）。
 // 导入类型下拉选项、「待核对」项类型见 ./import/helpers；各弹窗与独立区块已拆为 ./import 下的子组件。
@@ -319,8 +320,7 @@ export default function ImportManage() {
       const wb = X.utils.book_new();
       X.utils.book_append_sheet(wb, ws, '导入模板');
       const out = X.write(wb, { bookType: 'xlsx', type: 'array' }) as ArrayBuffer;
-      const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
-      if (isTauri) {
+      if (isTauriRuntime()) {
         const { save } = await import('@tauri-apps/plugin-dialog');
         const { writeFile } = await import('@tauri-apps/plugin-fs');
         const path = await save({

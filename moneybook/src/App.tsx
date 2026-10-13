@@ -6,8 +6,9 @@ import { OnboardingModal } from '@/components/onboarding/OnboardingModal';
 import { useActiveLedger } from '@/hooks/useLedgers';
 import { useLedgerStore } from '@/stores/useLedgerStore';
 import { runStartupTasks } from '@/api/startup';
-import { hydrateKV, getKV } from '@/api/kv';
+import { hydrateKV, getKV, isKVReady } from '@/api/kv';
 import { THEME_KEY } from '@/lib/constants';
+import { useUIStore } from '@/stores/useUIStore';
 import { useAIStore } from '@/stores/useAIStore';
 import { useKnowledgeStore } from '@/stores/useKnowledgeStore';
 import { useUpdateStore } from '@/stores/useUpdateStore';
@@ -28,7 +29,6 @@ const ReconcilePage = lazy(() => import('@/pages/Reconcile'));
 const Settings = lazy(() => import('@/pages/Settings'));
 const CalendarPage = lazy(() => import('@/pages/Calendar/CalendarPage'));
 const InsightsPage = lazy(() => import('@/pages/Insights'));
-const PlanningPage = lazy(() => import('@/pages/Planning'));
 
 function PageFallback() {
   return <div className="flex items-center justify-center py-24 text-sm text-muted">加载中…</div>;
@@ -49,9 +49,19 @@ export default function App() {
     (async () => {
       // 先从数据库偏好表载入主题并应用，避免启动瞬间主题闪烁（不再依赖 localStorage）
       await hydrateKV();
+      // 首启时序性失败（数据库尚未就绪）时短暂重试一次：hydrateKV 失败后会重置自身缓存 Promise，
+      // 故此处可再次触发真实载入，避免「本次启动主题读成默认值」。
+      if (!isKVReady()) {
+        await new Promise((r) => setTimeout(r, 300));
+        await hydrateKV();
+      }
       if (cancelled) return;
       const saved = (getKV(THEME_KEY, 'light') as 'light' | 'dark') || 'light';
-      document.documentElement.classList.toggle('dark', saved === 'dark');
+      // 统一入口：主题的「store 状态 + html 类名」只在此处设置一次（setTheme 内部同时切换 dark 类），
+      // 避免此前只用 classList 改类名、而 zustand store 仍停留在 light，导致提示框等组件用错主题。
+      useUIStore.getState().setTheme(saved);
+      // eslint-disable-next-line no-console
+      console.log('[theme] 启动应用主题：', saved, '（来自数据库偏好 kv.theme）');
       // 偏好已载入内存缓存，通知各 store 从缓存重建持久化数据
       useAIStore.getState().hydrate();
       useKnowledgeStore.getState().hydrate();
@@ -97,7 +107,6 @@ export default function App() {
             {/* 统计"洞察"已并入 /insights，旧地址重定向 */}
             <Route path="/stats/insights" element={<Navigate to="/insights" replace />} />
             <Route path="/insights" element={<InsightsPage />} />
-            <Route path="/planning" element={<PlanningPage />} />
             <Route path="/trash" element={<TrashPage />} />
             <Route path="/reconcile" element={<ReconcilePage />} />
             <Route path="/calendar" element={<CalendarPage />} />

@@ -14,6 +14,7 @@ import { DataTable } from '@/components/data-table/DataTable';
 import { EChart } from '@/components/charts/EChart';
 import type { EChartsOption } from 'echarts';
 import { formatMoney } from '@/lib/format';
+import RolloverPolicySection from './RolloverPolicySection';
 
 const PERIOD_OPTIONS: SelectOption[] = [
   { value: 'monthly', label: '月度' },
@@ -73,161 +74,173 @@ export default function BudgetManage() {
   }
 
   return (
-    <div className="space-y-4">
-      <div className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-4">
-        <h3 className="mb-3 font-semibold">新增预算</h3>
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-          <Select value={categoryId} onChange={setCategoryId} options={catOptions} />
-          <Select<BudgetPeriod> value={period} onChange={setPeriod} options={PERIOD_OPTIONS} placeholder="周期" />
-          <Input type="number" step="0.01" min="0.01" placeholder="金额" value={amount} onChange={(e) => setAmount(e.target.value)} />
-          <Button onClick={onCreate}>添加</Button>
-        </div>
-      </div>
+    <div className="space-y-8">
+      <section className="space-y-4">
+        <h3 className="text-lg font-bold tracking-tight">滚动预算策略</h3>
+        <RolloverPolicySection />
+      </section>
 
-      <div className="flex flex-wrap items-center gap-3">
-        <div className="flex items-center gap-2">
-          <span className="text-sm text-muted">查询周期</span>
-          <Select<BudgetPeriod> value={queryPeriod} onChange={setQueryPeriod} options={PERIOD_OPTIONS} className="w-28" />
+      <section className="space-y-4">
+        <h3 className="text-lg font-bold tracking-tight">新增预算</h3>
+        <div className="rounded-2xl border border-[var(--border)] bg-[var(--card)] p-6 shadow-sm">
+          <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+            <Select value={categoryId} onChange={setCategoryId} options={catOptions} />
+            <Select<BudgetPeriod> value={period} onChange={setPeriod} options={PERIOD_OPTIONS} placeholder="周期" />
+            <Input type="number" step="0.01" min="0.01" placeholder="金额" value={amount} onChange={(e) => setAmount(e.target.value)} />
+            <Button onClick={onCreate} className="w-full">添加预算</Button>
+          </div>
         </div>
-        <Input
-          type="month"
-          value={anchor}
-          onChange={(e) => { if (e.target.value) setAnchor(e.target.value); }}
-          className="w-40"
-        />
-        <span className="text-xs text-muted">{queryPeriod === 'monthly' ? '当月' : queryPeriod === 'quarterly' ? '当季' : '当年'}</span>
-      </div>
+      </section>
 
-      {budgets.length > 0 && (
-        <div className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-4">
-          <h3 className="mb-3 font-semibold">预算 vs 实际</h3>
-          <BudgetActualChart rows={budgets} />
+      <section className="space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <h3 className="text-lg font-bold tracking-tight">预算执行与明细</h3>
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-muted">查询周期</span>
+              <Select<BudgetPeriod> value={queryPeriod} onChange={setQueryPeriod} options={PERIOD_OPTIONS} className="w-28" />
+            </div>
+            <Input
+              type="month"
+              value={anchor}
+              onChange={(e) => { if (e.target.value) setAnchor(e.target.value); }}
+              className="w-40"
+            />
+            <span className="text-xs text-muted">{queryPeriod === 'monthly' ? '当月' : queryPeriod === 'quarterly' ? '当季' : '当年'}</span>
+          </div>
         </div>
-      )}
+        
+        {budgets.length > 0 && (
+          <div className="rounded-2xl border border-[var(--border)] bg-[var(--card)] p-6 shadow-sm">
+            <h3 className="mb-4 text-base font-semibold">预算 vs 实际支出</h3>
+            <BudgetActualChart rows={budgets} />
+          </div>
+        )}
 
-      <DataTable
-        data={budgets}
-        columns={[
-          {
-            key: 'category', header: '分类',
-            render: (r: BudgetVsActualAdvancedRow) => {
-              // 红点（超支）/ 黄点（接近上限）/ 无点（正常）
-              const pct = r.usable > 0 ? (r.actual / r.usable) * 100 : (r.actual > 0 ? 100 : 0);
-              const dotOn = pct >= 100 ? 'var(--color-danger)' : pct >= BUDGET_WARN_PERCENT ? 'var(--color-warning)' : null;
-              return (
-                <span className="inline-flex items-center gap-1.5">
-                  {dotOn && <span className="inline-block h-2 w-2 rounded-full" style={{ background: dotOn }} />}
-                  {r.category_icon} {r.category_name ?? '全部'}
-                </span>
-              );
+        <DataTable
+          data={budgets}
+          columns={[
+            {
+              key: 'category', header: '分类',
+              render: (r: BudgetVsActualAdvancedRow) => {
+                // 红点（超支）/ 黄点（接近上限）/ 无点（正常）
+                const pct = r.usable > 0 ? (r.actual / r.usable) * 100 : (r.actual > 0 ? 100 : 0);
+                const dotOn = pct >= 100 ? 'var(--color-danger)' : pct >= BUDGET_WARN_PERCENT ? 'var(--color-warning)' : null;
+                return (
+                  <span className="inline-flex items-center gap-1.5">
+                    {dotOn && <span className="inline-block h-2 w-2 rounded-full" style={{ background: dotOn }} />}
+                    {r.category_icon} {r.category_name ?? '全部'}
+                  </span>
+                );
+              },
             },
-          },
-          {
-            key: 'period', header: '周期',
-            render: (r: BudgetVsActualAdvancedRow) => <span>{periodLabel(r.period)}</span>,
-          },
-          {
-            key: 'budget', header: '预算',
-            render: (r: BudgetVsActualAdvancedRow) => <span className="font-medium">{formatMoney(r.period_amount)}</span>,
-          },
-          {
-            key: 'rolled_in', header: '滚入',
-            render: (r: BudgetVsActualAdvancedRow) => (
-              <span className="font-medium text-muted">{formatMoney(r.rolled_in)}</span>
-            ),
-          },
-          {
-            key: 'usable', header: '可用',
-            render: (r: BudgetVsActualAdvancedRow) => {
-              const open = expandedUsable.has(r.id);
-              const source = r.rollover_source;
-              return (
-                <div>
-                  <button
-                    type="button"
-                    onClick={() => toggleUsable(r.id)}
-                    title={open ? '收起明细' : '展开明细'}
-                    className="flex items-center gap-1 font-medium"
-                  >
-                    <span
-                      className={`inline-block text-[10px] leading-none text-muted transition-transform duration-150 ${open ? 'rotate-90' : ''}`}
+            {
+              key: 'period', header: '周期',
+              render: (r: BudgetVsActualAdvancedRow) => <span>{periodLabel(r.period)}</span>,
+            },
+            {
+              key: 'budget', header: '预算',
+              render: (r: BudgetVsActualAdvancedRow) => <span className="font-medium">{formatMoney(r.period_amount)}</span>,
+            },
+            {
+              key: 'rolled_in', header: '滚入',
+              render: (r: BudgetVsActualAdvancedRow) => (
+                <span className="font-medium text-muted">{formatMoney(r.rolled_in)}</span>
+              ),
+            },
+            {
+              key: 'usable', header: '可用',
+              render: (r: BudgetVsActualAdvancedRow) => {
+                const open = expandedUsable.has(r.id);
+                const source = r.rollover_source;
+                return (
+                  <div>
+                    <button
+                      type="button"
+                      onClick={() => toggleUsable(r.id)}
+                      title={open ? '收起明细' : '展开明细'}
+                      className="flex items-center gap-1 font-medium"
                     >
-                      ▶
-                    </span>
-                    {formatMoney(r.usable)}
-                  </button>
-                  {open && (
-                    <div className="mt-1 space-y-0.5 text-xs text-muted">
-                      <div>
-                        期初 {formatMoney(r.period_amount)} + 滚入 {formatMoney(r.rolled_in)}
-                        <span className="ml-1 font-medium text-[var(--text)]">¥{formatMoney(r.usable)}</span>
-                      </div>
-                      {source && (
+                      <span
+                        className={`inline-block text-[10px] leading-none text-muted transition-transform duration-150 ${open ? 'rotate-90' : ''}`}
+                      >
+                        ▶
+                      </span>
+                      {formatMoney(r.usable)}
+                    </button>
+                    {open && (
+                      <div className="mt-1 space-y-0.5 text-xs text-muted">
                         <div>
-                          滚入来自上期 {source.prev_period} 结余 ¥{formatMoney(source.prev_surplus)}
+                          期初 {formatMoney(r.period_amount)} + 滚入 {formatMoney(r.rolled_in)}
+                          <span className="ml-1 font-medium text-[var(--text)]">¥{formatMoney(r.usable)}</span>
                         </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-              );
-            },
-          },
-          {
-            key: 'actual', header: '实际支出',
-            render: (r: BudgetVsActualAdvancedRow) => {
-              const over = r.status === 'over';
-              return (
-                <span className="font-medium" style={{ color: over ? 'var(--color-danger)' : 'inherit' }}>
-                  {formatMoney(r.actual)}
-                </span>
-              );
-            },
-          },
-          {
-            key: 'diff', header: '剩余',
-            render: (r: BudgetVsActualAdvancedRow) => {
-              const diff = r.usable - r.actual;
-              return (
-                <span className="font-medium" style={{ color: diff < 0 ? 'var(--color-danger)' : 'var(--color-success)' }}>
-                  {diff >= 0 ? '+' : ''}{formatMoney(diff)}
-                </span>
-              );
-            },
-          },
-          {
-            key: 'progress', header: '进度',
-            render: (r: BudgetVsActualAdvancedRow) => {
-              const pct = r.usable > 0 ? Math.min(100, (r.actual / r.usable) * 100) : 0;
-              // 进度条配色：超支红 / 接近上限黄 / 正常主色
-              const barColor = pct >= 100 ? 'var(--color-danger)'
-                : pct >= BUDGET_WARN_PERCENT ? 'var(--color-warning)' : 'var(--color-primary)';
-              return (
-                <div className="flex items-center gap-2">
-                  <div className="h-2 w-20 overflow-hidden rounded-full bg-black/10 dark:bg-white/10">
-                    <div
-                      className="h-full rounded-full"
-                      style={{ width: `${pct}%`, background: barColor }}
-                    />
+                        {source && (
+                          <div>
+                            滚入来自上期 {source.prev_period} 结余 ¥{formatMoney(source.prev_surplus)}
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
-                  <span className="text-xs text-muted">{pct.toFixed(0)}%</span>
-                </div>
-              );
+                );
+              },
             },
-          },
-          {
-            key: 'actions', header: '操作',
-            render: (r: BudgetVsActualAdvancedRow) => (
-              <button
-                onClick={() => onDelete(r.id)}
-                className="rounded px-2 py-0.5 text-xs text-[var(--color-danger)] hover:bg-black/5 dark:hover:bg-white/5"
-              >
-                删除
-              </button>
-            ),
-          },
-        ]}
-      />
+            {
+              key: 'actual', header: '实际支出',
+              render: (r: BudgetVsActualAdvancedRow) => {
+                const over = r.status === 'over';
+                return (
+                  <span className="font-medium" style={{ color: over ? 'var(--color-danger)' : 'inherit' }}>
+                    {formatMoney(r.actual)}
+                  </span>
+                );
+              },
+            },
+            {
+              key: 'diff', header: '剩余',
+              render: (r: BudgetVsActualAdvancedRow) => {
+                const diff = r.usable - r.actual;
+                return (
+                  <span className="font-medium" style={{ color: diff < 0 ? 'var(--color-danger)' : 'var(--color-success)' }}>
+                    {diff >= 0 ? '+' : ''}{formatMoney(diff)}
+                  </span>
+                );
+              },
+            },
+            {
+              key: 'progress', header: '进度',
+              render: (r: BudgetVsActualAdvancedRow) => {
+                const pct = r.usable > 0 ? Math.min(100, (r.actual / r.usable) * 100) : 0;
+                // 进度条配色：超支红 / 接近上限黄 / 正常主色
+                const barColor = pct >= 100 ? 'var(--color-danger)'
+                  : pct >= BUDGET_WARN_PERCENT ? 'var(--color-warning)' : 'var(--color-primary)';
+                return (
+                  <div className="flex items-center gap-2">
+                    <div className="h-2 w-20 overflow-hidden rounded-full bg-black/10 dark:bg-white/10">
+                      <div
+                        className="h-full rounded-full"
+                        style={{ width: `${pct}%`, background: barColor }}
+                      />
+                    </div>
+                    <span className="text-xs text-muted">{pct.toFixed(0)}%</span>
+                  </div>
+                );
+              },
+            },
+            {
+              key: 'actions', header: '操作',
+              render: (r: BudgetVsActualAdvancedRow) => (
+                <button
+                  onClick={() => onDelete(r.id)}
+                  className="rounded px-2 py-0.5 text-xs text-[var(--color-danger)] hover:bg-black/5 dark:hover:bg-white/5"
+                >
+                  删除
+                </button>
+              ),
+            },
+          ]}
+        />
+      </section>
     </div>
   );
 }

@@ -12,15 +12,17 @@ import { toast } from 'sonner';
 import {
   checkForUpdate,
   friendlyUpdateError,
-  installUpdate,
+  downloadUpdate,
+  applyUpdate,
   markAutoChecked,
   shouldAutoCheck,
   type ReleaseInfo,
 } from '@/lib/update';
 import { formatAppVersion } from '@/lib/appVersion';
+import { isTauriRuntime } from '@/lib/runtime';
 
 /** 应用内更新的阶段状态机（UpdateDialog 按此渲染） */
-export type UpdatePhase = 'idle' | 'downloading' | 'installing' | 'error';
+export type UpdatePhase = 'idle' | 'downloading' | 'ready' | 'installing' | 'error';
 
 interface UpdateStore {
   /** 结果弹窗是否打开 */
@@ -41,9 +43,13 @@ interface UpdateStore {
   checkManually: () => Promise<void>;
   /** 启动自动扫描：静默执行，仅在有新版时弹窗；24h 节流 */
   checkSilently: () => Promise<void>;
-  /** 立即更新（应用内）：下载 → 签名校验 → 安装 → 自动重启 */
-  install: () => Promise<void>;
-  /** 关闭弹窗；下载/安装进行中不生效（防打断），否则顺带重置更新状态 */
+  /** 触发后台下载 */
+  download: () => Promise<void>;
+  /** 触发安装并重启 */
+  apply: () => Promise<void>;
+  /** 强制打开更新弹窗（例如点击顶部状态栏的准备就绪图标时） */
+  openDialog: () => void;
+  /** 关闭弹窗，支持后台化。如果在安装阶段则拦截关闭 */
   close: () => void;
 }
 
@@ -59,7 +65,6 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
   checkManually: async () => {
     if (get().checking) return;
     set({ checking: true });
-    // 关键位置日志：便于排查「检查更新无反应」类问题
     // eslint-disable-next-line no-console
     console.log('[update] 手动检查更新，本地版本', formatAppVersion());
     const r = await checkForUpdate();
@@ -67,7 +72,7 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
     switch (r.kind) {
       case 'available':
         set({ open: true, info: r.info });
-        toast.success(`发现新版本 V${r.info.version}`);
+        if (get().phase === 'idle') toast.success(`发现新版本 V${r.info.version}`);
         break;
       case 'latest':
         toast.success(`当前已是最新版本 ${formatAppVersion()}`);
@@ -76,22 +81,16 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
         toast.info('暂未检测到正式发布版本，请稍后再试');
         break;
       case 'error':
-        // message 已是友好文案（含重试/手动安装出路），直接展示，不再拼缀技术细节
         toast.error(r.message);
         break;
     }
   },
 
   checkSilently: async () => {
-    // 浏览器预览环境（非 Tauri）下 GitHub 更新接口不可达且无法应用内更新，
-    // 直接跳过自动扫描，避免控制台出现 net::ERR_FAILED 噪音（打包为桌面应用后才会真正检查）。
-    const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
-    if (!isTauri) return;
-    // 已有弹窗/正在检查时不重复发起；未到 24h 节流窗口直接跳过
+    if (!isTauriRuntime()) return;
     if (get().checking || get().open) return;
     if (!shouldAutoCheck()) return;
     const r = await checkForUpdate();
-    // 网络失败：不打扰用户、也不写节流时间戳——下次启动会自然重试
     if (r.kind === 'error') {
       // eslint-disable-next-line no-console
       console.warn('[update] 自动检查失败（静默）：', r.message);
@@ -101,35 +100,52 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
     if (r.kind === 'available') set({ open: true, info: r.info });
   },
 
-  install: async () => {
+  download: async () => {
     const { info, phase } = get();
     if (!info) return;
-    // 防重复触发：下载中/安装中再次点击直接忽略
-    if (phase === 'downloading' || phase === 'installing') return;
+    // 防重复触发
+    if (phase === 'downloading' || phase === 'ready' || phase === 'installing') return;
     set({ phase: 'downloading', downloaded: 0, total: 0, error: null });
-    // 关键位置日志：便于排查「点更新后无反应 / 卡住」类问题
     // eslint-disable-next-line no-console
-    console.log('[update] 开始应用内更新，目标版本 V' + info.version);
+    console.log('[update] 开始后台下载更新包 V' + info.version);
     try {
-      await installUpdate(info.version, {
+      await downloadUpdate(info.version, {
         onProgress: (downloaded, total) => set({ downloaded, total }),
-        onInstalling: () => set({ phase: 'installing' }),
+        onReady: () => {
+          set({ phase: 'ready' });
+          toast.success('新版本已下载就绪，点击右上角图标即可安装');
+        },
       });
-      // 走到这里说明进程未随安装重启（异常兜底路径）：回到空闲态，由用户决定后续
-      set({ phase: 'idle' });
     } catch (e) {
       // eslint-disable-next-line no-console
-      console.error('[update] 应用内更新失败：', e);
-      // 错误归一化为友好文案（不暴露 undefined / 技术细节），供弹窗错误态展示
+      console.error('[update] 下载失败：', e);
       set({ phase: 'error', error: friendlyUpdateError(e) });
     }
   },
 
+  apply: async () => {
+    const { phase } = get();
+    if (phase !== 'ready') return;
+    set({ phase: 'installing' });
+    try {
+      await applyUpdate();
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error('[update] 安装失败：', e);
+      set({ phase: 'error', error: friendlyUpdateError(e) });
+    }
+  },
+
+  openDialog: () => set({ open: true }),
+
   close: () => {
     const { phase } = get();
-    // 下载/安装进行中禁止关闭：中途关闭会让用户误以为更新已取消（实际下载仍在继续），
-    // 且 Windows 安装器一旦启动应用本就会退出，此时「关闭」并无实际意义
-    if (phase === 'downloading' || phase === 'installing') return;
-    set({ open: false, phase: 'idle', downloaded: 0, total: 0, error: null });
+    // 安装进行中禁止关闭，避免应用状态不可知
+    if (phase === 'installing') return;
+    set({ open: false });
+    // 若在空闲或报错状态，顺带重置（下载中或 ready 状态则保留进度）
+    if (phase === 'idle' || phase === 'error') {
+      set({ phase: 'idle', downloaded: 0, total: 0, error: null });
+    }
   },
 }));

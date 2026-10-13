@@ -1,35 +1,42 @@
 @import "tailwindcss";
 
 @theme {
-  --color-primary: #1e6fa9;
+  --color-primary: #0f172a;
   --color-primary-foreground: #ffffff;
-  --color-primary-fg: #1e6fa9;
+  --color-primary-fg: #0f172a;
   --color-success: #10b981;
   --color-danger: #ef4444;
   --color-warning: #f59e0b;
-  --radius-card: 12px;
+  --radius-card: 16px;
   --radius-btn: 8px;
 }
 
 :root {
   color-scheme: light;
-  --bg: #f8fafc;
-  --fg: #0f172a;
+  --bg: #f4f4f5; /* 更柔和的现代亮色底 (zinc-100) */
+  --fg: #18181b; /* zinc-900 */
   --card: #ffffff;
-  --muted: #64748b;
-  --border: #e2e8f0;
+  --muted: #71717a; /* zinc-500 */
+  --border: #e4e4e7; /* zinc-200 */
   --danger: #ef4444;
+  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+  --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+  --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
 }
 
 .dark {
   color-scheme: dark;
-  --bg: #0f172a;
-  --fg: #f1f5f9;
-  --card: #1e293b;
-  --muted: #94a3b8;
-  --border: #334155;
-  /* 暗色下主色文字前景换成更亮的主题蓝，规避深蓝在深底上对比度不足导致看不清 */
-  --color-primary-fg: #6fc0f0;
+  --bg: #09090b; /* zinc-950 */
+  --fg: #fafafa; /* zinc-50 */
+  --card: #18181b; /* zinc-900 */
+  --muted: #a1a1aa; /* zinc-400 */
+  --border: #27272a; /* zinc-800 */
+  --color-primary: #fafafa;
+  --color-primary-foreground: #09090b;
+  --color-primary-fg: #fafafa;
+  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.5);
+  --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.5), 0 2px 4px -2px rgb(0 0 0 / 0.5);
+  --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.5), 0 4px 6px -4px rgb(0 0 0 / 0.5);
 }
 
 * { box-sizing: border-box; }
@@ -40,6 +47,8 @@ html, body, #root {
   font-family: Inter, system-ui, "Microsoft YaHei", sans-serif;
   background: var(--bg);
   color: var(--fg);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 body {
@@ -53,38 +62,43 @@ input, textarea { user-select: text; }
 .text-muted { color: var(--muted); }
 .text-danger { color: var(--danger); }
 
-::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
-::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
-.dark ::-webkit-scrollbar-thumb { background: #475569; }
-.dark ::-webkit-scrollbar-thumb:hover { background: #64748b; }
+::-webkit-scrollbar-thumb { background: #d4d4d8; border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: #a1a1aa; }
+.dark ::-webkit-scrollbar-thumb { background: #3f3f46; }
+.dark ::-webkit-scrollbar-thumb:hover { background: #52525b; }
+
+/* 全局卡片基础样式覆盖 */
+.bg-\[var\(--card\)\] {
+  box-shadow: var(--shadow-sm);
+  transition: box-shadow 0.2s ease, transform 0.2s ease;
+}
+.bg-\[var\(--card\)\]:hover {
+  box-shadow: var(--shadow-md);
+}
 
 /* ==========================================================================
    全局提示（sonner toast）统一为「四色 popup」卡片设计
-   参考设计：成功/警示/错误/信息四种类型，各含图标 + 消息 + 右侧灰色关闭按钮，
-   浅色主题使用参考原色；深色主题自动切换为深色版本保证可读性。
    ========================================================================== */
 .app-toast {
   min-width: 300px;
   max-width: 380px;
-  border-radius: 4px !important;
-  padding: 6px 8px !important;
-  border: 1px solid !important;
-  box-shadow: 4px 4px 10px -10px rgba(0, 0, 0, 1) !important;
-  gap: 0.5rem !important;
+  border-radius: 12px !important;
+  padding: 12px 16px !important;
+  border: 1px solid var(--border) !important;
+  box-shadow: var(--shadow-lg) !important;
+  gap: 0.75rem !important;
+  background: var(--card) !important;
 }
 /* 内容区占满剩余宽度：长文本自动换行完整显示，不被图标/关闭按钮挤压截断 */
 .app-toast [data-content] { flex: 1 1 auto; min-width: 0; }
 .app-toast-icon { margin: 0; flex-shrink: 0; }
 .app-toast-icon svg { width: 1.25rem; height: 1.25rem; }
-.app-toast-title { font-size: 14px; font-weight: 500; line-height: 1.5; white-space: normal; }
-.app-toast-desc { font-size: 13px; opacity: 0.92; }
+.app-toast-title { font-size: 14px; font-weight: 600; line-height: 1.5; white-space: normal; }
+.app-toast-desc { font-size: 13px; opacity: 0.92; margin-top: 4px; }
 
-/* 关闭按钮：卡片内容区右侧的灰色 ×。
-   注意 sonner 把关闭按钮渲染为 toast 的第一个子元素（在图标/内容之前），
-   若不做处理会排在最左；这里用 order 强制排到最末 + margin-left:auto 推到最右，
-   从而呈现「图标 + 消息 …… ×」的参考设计布局。 */
+/* 关闭按钮：卡片内容区右侧的灰色 ×。 */
 .app-toast-close {
   position: static !important;
   transform: none !important;
@@ -92,11 +106,18 @@ input, textarea { user-select: text; }
   margin: 0 2px 0 auto;
   background: transparent !important;
   border: none !important;
-  border-radius: 4px !important;
-  color: #9ca3af;
-  height: 20px;
-  width: 20px;
+  border-radius: 6px !important;
+  color: var(--muted) !important;
+  height: 24px;
+  width: 24px;
   flex-shrink: 0;
+  transition: background 0.2s;
+}
+.app-toast-close:hover {
+  background: rgba(0, 0, 0, 0.05) !important;
+}
+.dark .app-toast-close:hover {
+  background: rgba(255, 255, 255, 0.1) !important;
 }
 .app-toast-close:hover { background: rgba(0, 0, 0, 0.05) !important; color: #6b7280; }
 .dark .app-toast-close { color: #64748b; }

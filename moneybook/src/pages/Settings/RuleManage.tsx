@@ -13,6 +13,7 @@ import { useKnowledgeStore, type KnowledgeEntry } from '@/stores/useKnowledgeSto
 import { downloadJSON, saveJSON, downloadText, saveText } from '@/lib/export';
 import { queryAuditLogs, type AuditEntry } from '@/api/audit';
 import AuditHistoryDialog from '@/components/ai/AuditHistoryDialog';
+import { isTauriRuntime } from '@/lib/runtime';
 
 /**
  * 智能规则（全部规则的统一栏目：四类规则合并为「统一规则列表」展示与在线管理）
@@ -124,12 +125,6 @@ function pickTextFile(accept: string): Promise<string> {
     };
     input.click();
   });
-}
-
-/** 是否桌面（Tauri）环境：决定导入导出走系统对话框还是浏览器回退 */
-function isTauriEnv(): boolean {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return typeof window !== 'undefined' && (window as any)?.__TAURI_INTERNALS__ !== undefined;
 }
 
 export default function RuleManage() {
@@ -283,7 +278,7 @@ export default function RuleManage() {
       if (!total) { toast.error('暂无规则可导出'); return; }
       const filename = `规则备份_${dayjs().format('YYYY-MM-DD')}.json`;
       console.log('[规则导出] 备份包条数：', total);
-      if (isTauriEnv()) {
+      if (isTauriRuntime()) {
         const dest = await saveJSON(filename, bundle);
         if (!dest) return; // 用户取消保存对话框
         toast.success(`已导出 ${total} 条规则：${dest}`);
@@ -343,7 +338,7 @@ export default function RuleManage() {
   async function handleImportRules() {
     try {
       let text: string;
-      if (isTauriEnv()) {
+      if (isTauriRuntime()) {
         const { open } = await import('@tauri-apps/plugin-dialog');
         const { readTextFile } = await import('@tauri-apps/plugin-fs');
         const p = await open({ filters: [{ name: '规则备份', extensions: ['json'] }], multiple: false });
@@ -369,7 +364,7 @@ export default function RuleManage() {
       if (!count) { toast.error('暂无可导出的启用规则'); return; }
       const filename = `规则清单_${dayjs().format('YYYY-MM-DD')}.md`;
       console.log('[规则文档导出] 条数：', count);
-      if (isTauriEnv()) {
+      if (isTauriRuntime()) {
         const dest = await saveText(filename, text);
         if (!dest) return; // 用户取消保存对话框
         toast.success(`已导出 ${count} 条规则：${dest}`);
@@ -405,7 +400,7 @@ export default function RuleManage() {
   async function handleImportDoc() {
     try {
       let text: string;
-      if (isTauriEnv()) {
+      if (isTauriRuntime()) {
         const { open } = await import('@tauri-apps/plugin-dialog');
         const { readTextFile } = await import('@tauri-apps/plugin-fs');
         const p = await open({ filters: [{ name: '规则文档', extensions: ['txt', 'md', 'markdown'] }], multiple: false });
@@ -433,7 +428,7 @@ export default function RuleManage() {
       const text = buildRulesDocTemplate();
       const filename = '规则文档模板.md';
       console.log('[规则模板] 生成模板字符数：', text.length);
-      if (isTauriEnv()) {
+      if (isTauriRuntime()) {
         const dest = await saveText(filename, text);
         if (!dest) return; // 用户取消保存对话框
         toast.success(`模板已保存：${dest}`);

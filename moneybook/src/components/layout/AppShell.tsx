@@ -13,8 +13,10 @@ export default function AppShell() {
       <Sidebar />
       <div className="flex flex-1 flex-col overflow-hidden">
         <Topbar />
-        <main className="flex-1 overflow-auto px-6 py-5">
-          <Outlet />
+        <main className="flex-1 overflow-auto px-8 py-6">
+          <div className="mx-auto max-w-7xl">
+            <Outlet />
+          </div>
         </main>
       </div>
       <CommandPalette />

@@ -9,7 +9,7 @@ import { Select } from '@/components/ui/select';
 import { Input } from '@/components/ui/input';
 import { DataTable } from '@/components/data-table/DataTable';
 import { formatMoney } from '@/lib/format';
-import { getPlanningDebts, type PlanningDebt } from '@/api/planning';
+import { useLoans } from '@/hooks/useLoans';
 import { simulateDebtPayoff, comparePayoff, type DebtStrategy } from '@/lib/debtSim';
 
 const STRATEGY_OPTIONS = [
@@ -18,25 +18,29 @@ const STRATEGY_OPTIONS = [
 ];
 
 export default function DebtPayoffSection() {
-  const [debts, setDebts] = useState<PlanningDebt[]>([]);
+  const { data: allLoans = [], isLoading: loading } = useLoans();
+  // 只选未结清的借入（债务）
+  const borrowLoans = useMemo(() => allLoans.filter((l) => l.direction === 'borrow' && l.status !== 'settled'), [allLoans]);
+  
+  // 维护一个自定义的 debts 列表，保存额外的模拟字段 minPayment
+  const [debts, setDebts] = useState<{ id: number; name: string; balance: number; apr: number; minPayment: number }[]>([]);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [extra, setExtra] = useState('200');
   const [strategy, setStrategy] = useState<DebtStrategy>('avalanche');
-  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    getPlanningDebts()
-      .then((list) => {
-        if (cancelled) return;
-        setDebts(list);
-        setSelected(new Set(list.map((d) => d.id))); // 默认全选
-      })
-      .catch((e) => { console.error('[规划] 借款数据加载失败', e); })
-      .finally(() => { if (!cancelled) setLoading(false); });
-    return () => { cancelled = true; };
-  }, []);
+    if (borrowLoans.length > 0 && debts.length === 0) {
+      const initialDebts = borrowLoans.map((d) => ({
+        id: d.id,
+        name: d.counterparty,
+        balance: d.remaining,
+        apr: d.rate,
+        minPayment: d.method === 'equal_payment' ? (d.principal * (d.rate / 100 / 12) * Math.pow(1 + d.rate / 100 / 12, d.periods || 12)) / (Math.pow(1 + d.rate / 100 / 12, d.periods || 12) - 1) : 0 // 简单估算，或者直接给0由用户填
+      }));
+      setDebts(initialDebts);
+      setSelected(new Set(initialDebts.map((d) => d.id)));
+    }
+  }, [borrowLoans]);
 
   const toggle = (id: number) =>
     setSelected((prev) => {

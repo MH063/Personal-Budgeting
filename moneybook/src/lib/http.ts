@@ -11,10 +11,7 @@
  * 注意：回退分支保留是为了浏览器预览与本地单测（providers.test.ts 依赖 stubGlobal('fetch')）。
  */
 
-/** 是否处于 Tauri 桌面运行时（与 db.ts / ocr.ts 的检测口径保持一致） */
-export function isTauriRuntime(): boolean {
-  return typeof window !== 'undefined' && (window as any).__TAURI_INTERNALS__ !== undefined;
-}
+import { isTauriRuntime } from './runtime';
 
 /**
  * 判断是否为「请求取消」错误。

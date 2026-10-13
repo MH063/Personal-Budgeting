@@ -55,35 +55,36 @@ function Rendered({ k }: { k: string }) {
 }
 
 export default function Settings() {
-  const [searchParams] = useSearchParams();
-  const [openGroup, setOpenGroup] = useState<number>(() => {
-    const t = resolveSettingsTab(searchParams.get('tab'));
-    const gi = GROUPS.findIndex((g) => g.keys.includes(t));
-    return gi >= 0 ? gi : 0;
-  });
-  // URL ?tab= 变化时即时切换到对应分区（无需刷新/重挂载）
-  useEffect(() => {
-    const t = resolveSettingsTab(searchParams.get('tab'));
-    const gi = GROUPS.findIndex((g) => g.keys.includes(t));
-    if (gi >= 0) setOpenGroup(gi);
-  }, [searchParams]);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const currentTab = resolveSettingsTab(searchParams.get('tab'));
+  
+  // 查找当前 tab 所在的组索引
+  const activeGroupIdx = GROUPS.findIndex((g) => g.keys.includes(currentTab));
+  
+  // 切换组时，默认选中该组的第一个子页
+  const handleGroupClick = (gi: number) => {
+    if (gi === activeGroupIdx) return;
+    setSearchParams({ tab: GROUPS[gi].keys[0] });
+  };
+
+  const activeGroup = GROUPS[activeGroupIdx >= 0 ? activeGroupIdx : 0];
 
   return (
-    <div>
-      <div className="mb-5">
+    <div className="flex flex-col gap-6">
+      <div>
         <h1 className="text-2xl font-bold tracking-tight">设置</h1>
         <p className="mt-1 text-sm text-muted">统一管理分类、账户、预算、智能规则、AI 与数据。</p>
       </div>
 
-      {/* 分段导航（选中态为主色卡片，未选中柔和悬浮） */}
-      <div className="mb-6 flex flex-wrap gap-1.5 rounded-2xl border border-[var(--border)] bg-[var(--card)] p-1.5 shadow-sm">
+      {/* 一级导航：分组 */}
+      <div className="flex flex-wrap gap-1.5 rounded-2xl border border-[var(--border)] bg-[var(--card)] p-1.5 shadow-sm">
         {GROUPS.map((g, gi) => {
-          const on = openGroup === gi;
+          const on = activeGroupIdx === gi;
           return (
             <button
               key={g.title}
               type="button"
-              onClick={() => setOpenGroup(on ? -1 : gi)}
+              onClick={() => handleGroupClick(gi)}
               className={`flex items-center gap-1.5 rounded-xl px-3 py-2 text-sm font-medium transition-all
                 ${on ? 'bg-[var(--color-primary)] text-white shadow-sm' : 'text-muted hover:bg-black/5 dark:hover:bg-white/10'}`}
             >
@@ -94,30 +95,40 @@ export default function Settings() {
         })}
       </div>
 
-      {/* 当前分区：轻量头部（图标+标题 / 分隔线 / 说明 / 子项胶囊）+ 各子页 */}
-      {GROUPS.map((g, gi) =>
-        openGroup === gi ? (
-          <div key={g.title} className="space-y-6">
-            <div>
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="flex items-center gap-1.5 text-sm font-semibold">{g.icon} {g.title}</span>
-                <span className="h-px flex-1 bg-[var(--border)]" />
-                <span className="text-xs text-muted">{g.desc}</span>
-              </div>
-              <div className="mt-2 flex flex-wrap gap-1.5">
-                {g.keys.map((k) => (
-                  <span key={k} className="rounded-full bg-black/5 px-2 py-0.5 text-xs text-muted dark:bg-white/10">{keyLabel(k)}</span>
-                ))}
-              </div>
+      {/* 二级导航：子页胶囊 */}
+      <div className="flex flex-col gap-6">
+        <div className="flex flex-col gap-4">
+          <div className="flex items-center gap-3">
+            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-[var(--color-primary)]/10 text-[var(--color-primary)]">
+              {activeGroup.icon}
             </div>
-            {g.keys.map((k) => (
-              <section key={k}>
-                <Rendered k={k} />
-              </section>
-            ))}
+            <div className="flex flex-col">
+              <span className="text-sm font-semibold">{activeGroup.title}</span>
+              <span className="text-xs text-muted">{activeGroup.desc}</span>
+            </div>
           </div>
-        ) : null
-      )}
+          <div className="flex flex-wrap gap-2">
+            {activeGroup.keys.map((k) => {
+              const on = currentTab === k;
+              return (
+                <button
+                  key={k}
+                  onClick={() => setSearchParams({ tab: k })}
+                  className={`rounded-xl px-4 py-1.5 text-sm font-medium transition-colors
+                    ${on ? 'bg-[var(--fg)] text-[var(--bg)] shadow-sm' : 'bg-[var(--card)] text-muted border border-[var(--border)] hover:bg-black/5 dark:hover:bg-white/10'}`}
+                >
+                  {keyLabel(k)}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* 内容区：仅渲染当前选中的子页 */}
+        <div className="min-h-[400px]">
+          <Rendered k={currentTab} />
+        </div>
+      </div>
     </div>
   );
 }

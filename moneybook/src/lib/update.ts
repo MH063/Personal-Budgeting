@@ -20,6 +20,7 @@ import { httpFetch } from '@/lib/http';
 import { compareVersion, parseStableTag } from '@/lib/version';
 import { APP_VERSION } from '@/lib/appVersion';
 import { toast } from 'sonner';
+import { isTauriRuntime } from './runtime';
 
 /** 内置更新仓库（唯一来源；GitHub Releases 必须发正式版才能被检查到） */
 export const UPDATE_REPO_SLUG = 'MH063/Personal-Budgeting';
@@ -223,8 +224,7 @@ export function markAutoChecked(): void {
  */
 export async function openExternal(url: string): Promise<void> {
   if (!url) return;
-  const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
-  if (!isTauri) {
+  if (!isTauriRuntime()) {
     window.open(url, '_blank', 'noopener,noreferrer');
     return;
   }
@@ -236,74 +236,77 @@ export async function openExternal(url: string): Promise<void> {
   }
 }
 
-// —— 应用内一键更新（下载 → 签名校验 → 安装 → 重启） ————————————————————
+// —— 应用内更新（下载与安装解耦，后台静默体验） ————————————————————
 
-/** 应用内更新的阶段回调（驱动 UpdateDialog 的 UI 状态机） */
+/** 应用内更新的阶段回调（驱动 UI 状态机） */
 export interface UpdateInstallCallbacks {
   /** 下载进度：累计已下载字节 / 总字节（服务端未提供长度时 total 为 0） */
   onProgress?: (downloaded: number, total: number) => void;
-  /** 下载完成、进入安装阶段（此后应用随时可能退出并由安装器重启） */
-  onInstalling?: () => void;
+  /** 下载完成，进入待安装重启状态 */
+  onReady?: () => void;
+}
+
+let cachedUpdateResource: import('@tauri-apps/plugin-updater').Update | null = null;
+
+import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
+
+/** 缓存下载完成的 ZIP 路径 */
+let cachedUpdateZipPath: string | null = null;
+
+/**
+ * 步骤一：后台下载更新包。
+ * 下载成功后将资源保留在内存中，不立刻安装。
+ */
+export async function downloadUpdate(
+  expectedVersion: string,
+  callbacks: UpdateInstallCallbacks = {},
+): Promise<void> {
+  if (!isTauriRuntime()) throw new Error('当前环境不支持应用内更新，请前往下载页手动安装');
+
+  const zipUrl = `https://github.com/${UPDATE_REPO_SLUG}/releases/download/v${expectedVersion}/moneybook-update-windows.zip`;
+
+  // 监听下载进度
+  const unlistenStarted = await listen<{ downloaded: number; total: number }>('update-download-started', (e) => {
+    callbacks.onProgress?.(e.payload.downloaded, e.payload.total);
+  });
+  const unlistenProgress = await listen<{ downloaded: number; total: number }>('update-download-progress', (e) => {
+    callbacks.onProgress?.(e.payload.downloaded, e.payload.total);
+  });
+
+  try {
+    const zipPath = await invoke<string>('download_update_custom', { url: zipUrl });
+    cachedUpdateZipPath = zipPath;
+    callbacks.onReady?.();
+  } catch (error) {
+    console.error('下载更新包失败:', error);
+    throw new Error('下载更新包失败，请检查网络或稍后重试');
+  } finally {
+    unlistenStarted();
+    unlistenProgress();
+  }
 }
 
 /**
- * 应用内一键更新：在不离开本应用的情况下完成「下载 → 校验 → 安装 → 重启」。
- *
- * 安全链说明（为什么可以放心一键装）：
- *   1) 更新清单来自内置 endpoint（tauri.conf.json 的 plugins.updater.endpoints，
- *      指向 GitHub Release 中的 latest.json），请求由 Rust 侧发出，不受 WebView 限制；
- *   2) 安装包下载后由 Rust 侧用内置公钥（plugins.updater.pubkey）校验 minisign 签名，
- *      签名不符直接抛错 —— 任何伪造/篡改的包都不可能被安装；
- *   3) expectedVersion 是弹窗展示的版本（来自 GitHub API 检查结果）。正常发布流程下
- *      两者必然一致（同一次 CI 从同一 Release 生成清单与安装包）；若不一致说明发布
- *      数据不同步，此时拒绝安装并提示手动下载，避免「展示版本与实装版本不符」。
- *
- * 平台行为：
- *   - Windows：downloadAndInstall 启动 NSIS 安装器后本进程自动退出，安装器装完
- *     自动重启（插件默认 restartAfterInstall=true），后续 relaunch() 不会被执行；
- *   - macOS/Linux：下载安装后由本函数调用 relaunch() 重启进入新版本。
- *
- * 非 Tauri 环境（浏览器预览）抛「不支持」错误，由调用方回退到「前往下载页」。
+ * 步骤二：安装已下载的更新并重启。
+ * 针对 Windows 走双进程无感守护更新，替代默认 NSIS 安装条
+ */
+export async function applyUpdate(): Promise<void> {
+  if (!cachedUpdateZipPath) {
+    throw new Error('找不到已下载的更新包资源');
+  }
+  
+  // 调起 Rust 写的微型更新器，主程序会自动退出
+  await invoke('apply_update_custom', { zipPath: cachedUpdateZipPath });
+}
+
+/**
+ * 兼容遗留的“一键立刻更新”逻辑
  */
 export async function installUpdate(
   expectedVersion: string,
   callbacks: UpdateInstallCallbacks = {},
 ): Promise<void> {
-  const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
-  if (!isTauri) throw new Error('当前环境不支持应用内更新，请前往下载页手动安装');
-  // 动态导入：仅在真正执行安装时才加载插件模块（浏览器预览零副作用）
-  const [{ check }, { relaunch }] = await Promise.all([
-    import('@tauri-apps/plugin-updater'),
-    import('@tauri-apps/plugin-process'),
-  ]);
-  const update = await check();
-  if (!update) {
-    throw new Error('更新源暂未就绪（未获取到可安装的更新包），请稍后重试或前往下载页');
-  }
-  if (update.version !== expectedVersion) {
-    // 拿到资源但不安装：显式释放 Rust 侧持有的更新资源，避免泄漏
-    await update.close();
-    throw new Error(
-      `更新源版本不一致（页面 V${expectedVersion} / 更新源 V${update.version}），请前往下载页手动安装`,
-    );
-  }
-  let downloaded = 0;
-  let total = 0;
-  await update.downloadAndInstall((event) => {
-    switch (event.event) {
-      case 'Started':
-        total = event.data.contentLength ?? 0;
-        callbacks.onProgress?.(downloaded, total);
-        break;
-      case 'Progress':
-        downloaded += event.data.chunkLength;
-        callbacks.onProgress?.(downloaded, total);
-        break;
-      case 'Finished':
-        callbacks.onInstalling?.();
-        break;
-    }
-  });
-  // Windows 上安装器启动后本进程已退出，走不到这里；macOS/Linux 在此重启进入新版本
-  await relaunch();
+  await downloadUpdate(expectedVersion, callbacks);
+  await applyUpdate();
 }

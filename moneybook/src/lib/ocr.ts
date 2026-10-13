@@ -13,6 +13,7 @@
  * 纯函数（normalizeOcrText / ocrTargetSize / mergeOcrLinesByY）与引擎副作用部分（recognizeImage）分离，便于单元测试。
  */
 import { OcrEngineWorker, type OcrEngineOptions, type RecognizeOptions, type OcrLine, type Quad } from '@ocr-web/core';
+import { isTauriRuntime } from './runtime';
 
 /** 开发/测试环境标志：仅开发环境输出耗时分解等调试日志，生产不刷屏、不透出内部信息 */
 const IS_DEV = import.meta.env?.DEV ?? false;
@@ -52,12 +53,6 @@ export const OCR_MODEL_MANIFEST: Record<string, string> = {
   'ch_ppocr_mobile_v2.0_cls_infer.onnx': 'cf443393df5e23f068c113f2ee5ee286918da7c386535a4ccd8c9c815d808445',
   'ppocr_keys_v1.txt': 'a1c84d9bdb9ab29043c58896224d32941783eb821629618416dcb08f12886492',
 };
-
-/** 是否运行在 Tauri 桌面（存在 IPC 全局）；Worker/浏览器预览返回 false。 */
-function isTauriRuntime(): boolean {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return typeof (window as any)?.__TAURI_INTERNALS__ !== 'undefined';
-}
 
 interface ModelCheckLite { file: string; present: boolean; matched: boolean }
 

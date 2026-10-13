@@ -1,7 +1,8 @@
 import dayjs from 'dayjs';
 import { readAIConfig, useAIStore } from '@/stores/useAIStore';
 import { getKV, setKV } from './kv';
-import { httpFetch, isAbortError, isTauriRuntime } from '@/lib/http';
+import { httpFetch, isAbortError } from '@/lib/http';
+import { isTauriRuntime } from '@/lib/runtime';
 import { getInsights, getCategoryDistribution, getNetWorth } from './stats';
 import { select } from './db';
 import { listTransactionsDetailed } from './transactions';

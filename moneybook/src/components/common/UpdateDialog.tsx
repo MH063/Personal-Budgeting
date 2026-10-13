@@ -26,96 +26,107 @@ export function UpdateDialog() {
   const downloaded = useUpdateStore((s) => s.downloaded);
   const total = useUpdateStore((s) => s.total);
   const error = useUpdateStore((s) => s.error);
-  const install = useUpdateStore((s) => s.install);
+  const download = useUpdateStore((s) => s.download);
+  const apply = useUpdateStore((s) => s.apply);
   const close = useUpdateStore((s) => s.close);
   if (!info) return null;
 
-  /** 下载中/安装中：UI 切换为进度视图，且不渲染任何可关闭/放弃的按钮 */
   const busy = phase === 'downloading' || phase === 'installing';
-  /** 总长度未知（服务端未提供）时按 0 处理，进度条走不确定态（仅展示已下载量） */
+  const ready = phase === 'ready';
   const percent = total > 0 ? Math.min(100, Math.round((downloaded / total) * 100)) : 0;
 
   return (
-    <Modal open={open} onClose={close} title={`发现新版本 V${info.version}`}>
-      <div className="space-y-3 text-sm">
+    <Modal open={open} onClose={close} title={ready ? '新版本已就绪' : `发现新版本 V${info.version}`}>
+      <div className="space-y-4 text-sm">
         <p className="text-muted">
-          当前版本 <span className="font-medium text-[var(--text)]">{formatAppVersion()}</span>
+          当前版本 <span className="font-medium text-[var(--fg)]">{formatAppVersion()}</span>
           <span className="mx-2">→</span>
           新版本 <span className="font-medium text-[var(--color-primary)]">V{info.version}</span>
         </p>
 
         {info.notes && (
-          <pre className="max-h-48 overflow-auto whitespace-pre-wrap rounded-lg border border-[var(--border)] bg-[var(--bg)] p-3 text-xs text-muted">
+          <pre className="max-h-48 overflow-auto whitespace-pre-wrap rounded-xl border border-[var(--border)] bg-[var(--bg)] p-4 text-xs leading-relaxed text-muted shadow-inner">
             {info.notes}
           </pre>
         )}
 
-        {busy ? (
-          // —— 下载/安装进度视图：此阶段弹窗不可关闭，提示用户勿关闭应用 ——
-          <div className="space-y-2 rounded-lg border border-[var(--border)] bg-[var(--bg)] p-3">
-            <p className="text-xs text-muted">
-              {phase === 'downloading'
-                ? `正在下载更新包…${
-                    total > 0 ? ` ${toMb(downloaded)} MB / ${toMb(total)} MB` : ` 已下载 ${toMb(downloaded)} MB`
-                  }`
-                : '下载完成，正在安装…应用即将自动重启'}
+        {(busy || ready) ? (
+          <div className="space-y-3 rounded-xl border border-[var(--border)] bg-[var(--bg)] p-4 shadow-sm">
+            <p className="text-xs font-medium text-muted">
+              {phase === 'downloading' && `正在后台下载更新包…${total > 0 ? ` ${toMb(downloaded)} MB / ${toMb(total)} MB` : ` 已下载 ${toMb(downloaded)} MB`}`}
+              {phase === 'ready' && '下载完成，已准备好安装'}
+              {phase === 'installing' && '正在安装并准备重启…'}
             </p>
-            <div className="h-1.5 overflow-hidden rounded-full bg-[var(--border)]">
+            <div className="h-2 overflow-hidden rounded-full bg-[var(--border)]">
               <div
-                className="h-full rounded-full bg-[var(--color-primary)] transition-all"
-                style={{ width: `${phase === 'installing' ? 100 : percent}%` }}
+                className="h-full rounded-full bg-[var(--color-primary)] transition-all duration-300"
+                style={{ width: `${(phase === 'ready' || phase === 'installing') ? 100 : percent}%` }}
               />
             </div>
-            <p className="text-[11px] text-muted">
-              更新包需通过内置公钥签名校验后才会安装；安装完成会自动重启，请勿关闭应用。
-            </p>
+            {phase === 'downloading' && (
+              <p className="text-[11px] text-muted">
+                你可以关闭此窗口，下载会在后台继续进行。下载完成后会通知你进行安装。
+              </p>
+            )}
+            {phase === 'ready' && (
+              <p className="text-[11px] text-muted">
+                更新包已通过校验。点击下方按钮将立即安装并重启应用。
+              </p>
+            )}
+            {phase === 'installing' && (
+              <p className="text-[11px] text-[var(--color-warning)]">
+                安装中，请勿强制关闭应用。
+              </p>
+            )}
           </div>
         ) : (
           <>
             {phase === 'error' && (
               <div className="space-y-1.5">
-                <div
-                  className="rounded-lg border border-[var(--border)] p-3 text-xs"
-                  style={{ color: 'var(--color-danger)' }}
-                >
+                <div className="rounded-xl border border-[var(--color-danger)]/30 bg-[var(--color-danger)]/5 p-3 text-xs text-[var(--color-danger)]">
                   更新失败：{error || '未知错误'}
                 </div>
                 <p className="text-[11px] text-muted">
-                  可稍后重试；也可点「前往下载页」下载安装包手动覆盖安装（不影响本机账本数据），离线更新永远可用。
+                  可稍后重试；也可点「前往下载页」下载安装包手动覆盖安装（不影响本机账本数据）。
                 </p>
               </div>
             )}
-
             <p className="text-xs text-muted">
-              点「立即更新」将全程静默完成「下载 → 签名校验 → 安装 → 自动重启」，无需重新安装或手动操作，等待片刻自动进入新版本；你的配置、账户、分类与账本数据均完整保留。
+              点「开始下载」将在后台静默获取更新包。下载完成后，你可以随时选择合适的时机进行重启安装。
             </p>
-
-            <div className="flex flex-wrap justify-end gap-2 pt-1">
-              {phase === 'error' && (
-                <Button variant="outline" size="sm" onClick={() => void openExternal(info.url)}>
-                  前往下载页
-                </Button>
-              )}
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => {
-                  skipVersion(info.version);
-                  toast.success(`已跳过 V${info.version}，后续更高版本仍会提醒`);
-                  close();
-                }}
-              >
-                跳过此版本
-              </Button>
-              <Button variant="outline" size="sm" onClick={close}>
-                稍后提醒
-              </Button>
-              <Button size="sm" onClick={() => void install()}>
-                {phase === 'error' ? '重试更新' : '立即更新'}
-              </Button>
-            </div>
           </>
         )}
+
+        <div className="flex flex-wrap justify-end gap-3 pt-2">
+          {phase === 'error' && (
+            <Button variant="outline" size="sm" onClick={() => void openExternal(info.url)}>
+              前往下载页
+            </Button>
+          )}
+
+          {phase !== 'installing' && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                if (phase === 'idle' || phase === 'error') skipVersion(info.version);
+                close();
+              }}
+            >
+              {phase === 'downloading' || phase === 'ready' ? '关闭窗口（后台进行）' : '跳过此版本'}
+            </Button>
+          )}
+
+          {phase === 'idle' || phase === 'error' ? (
+            <Button size="sm" onClick={() => void download()}>
+              {phase === 'error' ? '重试下载' : '开始下载'}
+            </Button>
+          ) : phase === 'ready' ? (
+            <Button size="sm" onClick={() => void apply()}>
+              立即安装并重启
+            </Button>
+          ) : null}
+        </div>
       </div>
     </Modal>
   );

@@ -9,6 +9,7 @@ import { estimateStorageUsage } from './db';
 import { getKV, setKV, hydrateKV } from './kv';
 import { toast } from 'sonner';
 import { BACKUP_REMINDED_KEY, CAPACITY_WARN_PCT, LAST_BACKUP_KEY } from '@/lib/constants';
+import { isTauriRuntime } from '@/lib/runtime';
 
 let started = false;
 
@@ -20,6 +21,49 @@ function schedule(fn: () => Promise<unknown>) {
     console.error('[startup] 自动任务执行失败：', e);
   });
   pending.push(p);
+}
+
+/**
+ * 启动时的系统临时文件与更新缓存清理操作。
+ * 确保在清理过程中不影响客户端的正常启动。
+ * 清理前需对所有临时文件进行分类识别，排除系统运行必需文件。
+ */
+async function cleanUpdateGarbage(): Promise<void> {
+  try {
+    const { tempDir } = await import('@tauri-apps/api/path');
+    const { readDir, remove, stat } = await import('@tauri-apps/plugin-fs');
+    const tmpPath = await tempDir();
+    
+    // 读取系统临时目录，寻找属于 Tauri updater 遗留的安装包文件
+    // Updater 下载的包通常包含 "moneybook" 或 "tauri-updater" 前缀，且为 .zip 或 .exe
+    const entries = await readDir(tmpPath);
+    for (const entry of entries) {
+      if (!entry.name) continue;
+      const lowerName = entry.name.toLowerCase();
+      // 识别：以 moneybook 开头且为安装包，或是 tauri-updater 产生的遗留缓存
+      if (
+        (lowerName.startsWith('moneybook') && (lowerName.endsWith('.zip') || lowerName.endsWith('.exe'))) ||
+        lowerName.includes('tauri-updater')
+      ) {
+        try {
+          const filePath = `${tmpPath}${entry.name}`;
+          const fileStat = await stat(filePath);
+          // 安全策略：仅清理 2 小时前的文件，防止误删正在后台下载的更新包
+          if (fileStat.mtime) {
+            const ageMs = Date.now() - fileStat.mtime.getTime();
+            if (ageMs > 2 * 60 * 60 * 1000) {
+              await remove(filePath, { recursive: false });
+              console.log(`[cleanup] 已清理遗留的更新临时文件: ${entry.name}`);
+            }
+          }
+        } catch (err) {
+          // 忽略单个文件的删除错误（如权限不足或正在被占用）
+        }
+      }
+    }
+  } catch (e) {
+    // 权限不足或不支持的平台，静默失败即可
+  }
 }
 
 /**
@@ -63,10 +107,9 @@ async function checkBackupSafety(): Promise<void> {
 export function runStartupTasks(): void {
   if (started) return;
   started = true;
-  // 检测 Tauri 桌面运行时：不存在 __TAURI_INTERNALS__ 说明未在 Tauri WebView 内
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const inTauri = typeof (window as any)?.__TAURI_INTERNALS__ !== 'undefined';
-  if (!inTauri) {
+  // 非 Tauri 环境（如纯浏览器预览，无 Tauri IPC）下数据库不可用，
+  // 直接跳过全部任务，避免连库抛错刷屏 error 日志，也不影响桌面端正常运行。
+  if (!isTauriRuntime()) {
     console.info('[startup] 非 Tauri 环境，跳过自动任务');
     return;
   }
@@ -75,6 +118,7 @@ export function runStartupTasks(): void {
   schedule(checkOverdueLoans);       // 逾期判定 + 逾期利息累计
   schedule(ensureBudgetCurrentPeriod); // 预算滚动收口（未来起点异常行归一到当前期）
   schedule(checkBackupSafety);       // 备份/容量安全提醒
+  schedule(cleanUpdateGarbage);      // 启动时清理上个版本的更新遗留安装包
 }
 
 /** 等待已排队的启动任务完成（供需要时等待，非必须） */

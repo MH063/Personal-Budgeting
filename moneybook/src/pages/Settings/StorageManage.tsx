@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button';
 import { Hint } from '@/components/ui/hint';
 import { ConfirmDialog } from '@/components/common/ConfirmDialog';
 import { STORAGE_SAVE_DIR_KEY } from '@/lib/constants';
+import { isTauriRuntime } from '@/lib/runtime';
 
 /** 存储概览（与 Rust get_storage_overview 返回结构一一对应） */
 interface StorageOverview {
@@ -36,11 +37,6 @@ function fmtSize(n: number): string {
     i += 1;
   }
   return `${v.toFixed(i === 0 || v >= 100 ? 0 : 1)} ${units[i]}`;
-}
-
-/** 是否 Tauri 桌面运行时（浏览器预览下原生命令不可用） */
-function isTauri(): boolean {
-  return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 }
 
 /** 占比条：占用率着色（<70% 主色、70~90% 黄、>90% 红） */
@@ -89,7 +85,7 @@ const EXPORT_DIR_HINT =
  *    主库 / -wal / .bak 快照绝不触碰。
  */
 export default function StorageManage() {
-  const tauri = isTauri();
+  const tauri = isTauriRuntime();
   const [saveDir, setSaveDir] = useState(() => getKV(STORAGE_SAVE_DIR_KEY));
   const [ov, setOv] = useState<StorageOverview | null>(null);
   const [loading, setLoading] = useState(false);

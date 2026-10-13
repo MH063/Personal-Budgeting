@@ -12,11 +12,7 @@
  *  - 幂等：hydrateKV() 多次调用安全（内部缓存 Promise）。
  */
 import { execute, select } from './db';
-
-/** 判断是否处于 Tauri 桌面运行时（无原生桥时跳过真实落库，仅维护内存缓存，供单测使用） */
-function isTauriRuntime(): boolean {
-  return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
-}
+import { isTauriRuntime } from '@/lib/runtime';
 
 /** 内存缓存：key → value（仅含 `kv.%` 前缀的 settings 行） */
 const cache = new Map<string, string>();
@@ -42,13 +38,24 @@ export function hydrateKV(): Promise<void> {
         `SELECT key, value FROM settings WHERE key LIKE 'kv.%'`
       );
       cache.clear();
-      for (const r of rows) cache.set(r.key, r.value);
+      for (const r of rows) {
+        cache.set(r.key, r.value);
+        if (r.key === 'kv.theme') {
+          // 关键位置日志：便于桌面端排查「主题重启后丢失」时确认是否真的读到了库里的值
+          // eslint-disable-next-line no-console
+          console.log('[kv] 载入主题偏好 kv.theme =', r.value);
+        }
+      }
       // eslint-disable-next-line no-console
       console.log('[kv] 已从数据库载入偏好项：', cache.size, '条');
     } catch (e) {
-      // 数据库未就绪（如极端首启时序）时降级为空缓存，不阻塞启动
+      // 数据库未就绪（如极端首启时序）时降级为空缓存，不阻塞启动。
+      // 重要：此处必须重置 hydration，允许下次调用重试——否则首启时序性失败会被
+      // 永久缓存成「已完成的空载入」，导致本次会话所有偏好项（含主题）都读成默认值，
+      // 且后续不再重试，表现为「每次启动主题都回到默认」。
+      hydration = null;
       // eslint-disable-next-line no-console
-      console.error('[kv] 载入偏好项失败，本次会话使用默认值', e);
+      console.error('[kv] 载入偏好项失败，本次会话使用默认值（已允许下次重试）：', e);
     }
   })();
   return hydration;

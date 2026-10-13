@@ -144,6 +144,21 @@ jobs:
           args: --bundles nsis
           assetNamePattern: 'moneybook_[version]_[arch]-setup[ext]'
 
+      - name: 打包绿色更新 ZIP
+        working-directory: moneybook/src-tauri/target/release
+        shell: pwsh
+        run: |
+          Compress-Archive -Path moneybook.exe -DestinationPath moneybook-update-windows.zip
+          Write-Host "ZIP 包打包完成"
+
+      - name: 上传绿色更新 ZIP 到 Release
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ github.ref_name }}" moneybook/src-tauri/target/release/moneybook-update-windows.zip
+          echo "ZIP 包上传完成"
+
       - name: 正式发布（草稿 → 公开）
         # 草稿态 Release 用户不可见、也不会成为「最新版」，应用内更新读的
         # releases/latest 拿不到它；上传全部资产（含 latest.json 与签名）后在此

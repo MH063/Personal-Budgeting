@@ -2,8 +2,11 @@
 
 mod commands;
 mod datadir;
+pub mod updater;
 
 use tauri_plugin_sql::{Migration, MigrationKind};
+
+pub use updater::run_updater;
 
 fn get_migrations() -> Vec<Migration> {
     vec![
@@ -125,6 +128,9 @@ pub fn run() {
             // 数据目录：前端 Database.load 的连接串 / 便携迁移
             datadir::get_db_url,
             datadir::migrate_to_portable,
+            // 自定义静默更新
+            commands::update::download_update_custom,
+            commands::update::apply_update_custom,
         ])
         // 数据目录决策结果 + 事务连接持有器：全局共享
         .manage(db_location)

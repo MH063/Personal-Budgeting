@@ -3,3 +3,4 @@ pub mod health;
 pub mod ocr;
 pub mod storage;
 pub mod tx;
+pub mod update;

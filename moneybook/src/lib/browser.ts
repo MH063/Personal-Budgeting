@@ -1,5 +1,6 @@
 import { toast } from 'sonner';
 import { openExternal } from './update';
+import { isTauriRuntime } from './runtime';
 
 /**
  * 应用内置浏览器：在 Tauri 内新建/复用一个独立 WebviewWindow 打开外部链接
@@ -14,8 +15,7 @@ import { openExternal } from './update';
  */
 export async function openInAppBrowser(url: string): Promise<void> {
   if (!url) return;
-  const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
-  if (!isTauri) {
+  if (!isTauriRuntime()) {
     window.open(url, '_blank', 'noopener,noreferrer');
     return;
   }

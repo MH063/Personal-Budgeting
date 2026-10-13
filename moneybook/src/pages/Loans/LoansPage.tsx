@@ -13,6 +13,8 @@ import { EmptyState } from '@/components/common/EmptyState';
 import { formatMoney } from '@/lib/format';
 import { calcLoanInterest, type Loan } from '@/api/loans';
 
+import DebtPayoffSection from './DebtPayoffSection';
+
 export default function LoansPage() {
   const { data: loans = [], isLoading } = useLoans();
   const { remove, settle, unSettle } = useLoanMutations();
@@ -103,6 +105,12 @@ export default function LoansPage() {
         description="管理借出与借入"
         action={<button onClick={() => { setEditLoan(null); setFormOpen(true); }} className="rounded-lg px-3 py-1.5 text-sm text-white" style={{ background: 'var(--color-primary)' }}>+ 建立借贷</button>}
       />
+      
+      <div className="mb-6 space-y-4">
+        <h2 className="text-lg font-bold">债务偿还模拟</h2>
+        <DebtPayoffSection />
+      </div>
+
       <div className="mb-5 grid grid-cols-2 gap-4">
         <div className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-4">
           <div className="text-sm text-muted">待收回（应收）</div>

@@ -11,6 +11,7 @@ import {
   RECON_SQL,
   RECON_TRANSACTION_COL,
 } from './schema';
+import { isBrowserPreview } from '@/lib/runtime';
 
 export interface ExecResult {
   rowsAffected: number;
@@ -195,20 +196,6 @@ async function ensureRawSchema(conn: any): Promise<void> {
 }
 
 // ---------------- 统一 API ----------------
-
-/**
- * 检测是否运行在 Tauri 桌面环境（存在 IPC 全局对象）。
- * 非 Tauri（如纯浏览器 vite 预览）时数据库不可达，select/execute 静默降级为空数据，
- * 避免每个查询都触发 `@tauri-apps/plugin-sql` 的 invoke 错误而刷屏；桌面端不受影响。
- */
-let browserPreview: boolean | null = null;
-function isBrowserPreview(): boolean {
-  if (browserPreview === null) {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    browserPreview = typeof (window as any)?.__TAURI_INTERNALS__ === 'undefined';
-  }
-  return browserPreview;
-}
 
 /**
  * 归一化 Tauri IPC 抛出的错误。

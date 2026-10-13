@@ -11,6 +11,7 @@ import { exportAllData, maskExportBundle } from '@/api/dataExport';
 import { downloadJSON, saveJSON } from '@/lib/export';
 import { seedTestData } from '@/api/seed';
 import { resetAllData } from '@/api/factoryReset';
+import { isTauriRuntime } from '@/lib/runtime';
 
 export default function BackupRestore() {
   const [lastBackup, setLastBackup] = useState<string | null>(() => getKV(LAST_BACKUP_KEY) || null);
@@ -86,9 +87,7 @@ export default function BackupRestore() {
       const raw = await exportAllData();
       const bundle = maskExportBundle(raw, inclSensitive); // 默认脱敏
       const filename = `全部数据_${dayjs().format('YYYY-MM-DD')}${inclSensitive ? '_含敏感' : ''}.json`;
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const isTauri = typeof window !== 'undefined' && (window as any)?.__TAURI_INTERNALS__ !== undefined;
-      if (isTauri) {
+      if (isTauriRuntime()) {
         const dest = await saveJSON(filename, bundle);
         if (!dest) return; // 用户取消保存对话框
         toast.success(
@@ -107,8 +106,7 @@ export default function BackupRestore() {
 
   /** 一键填充测试数据（桌面可写库；浏览器预览仅提示） */
   async function handleSeed() {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    if (typeof (window as any)?.__TAURI_INTERNALS__ === 'undefined') {
+    if (!isTauriRuntime()) {
       toast.warning('浏览器预览不可写库，请在 Tauri 桌面版使用「填充测试数据」。');
       return;
     }
@@ -122,8 +120,7 @@ export default function BackupRestore() {
 
   /** 恢复出厂设置：清空全部数据并回到首次引导（浏览器预览仅提示不可执行） */
   async function handleFactoryReset() {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    if (typeof (window as any)?.__TAURI_INTERNALS__ === 'undefined') {
+    if (!isTauriRuntime()) {
       toast.warning('浏览器预览不可写库，请在 Tauri 桌面版执行恢复出厂设置。');
       setResetArmed(false);
       setResetConfirmText('');
