@@ -21,7 +21,7 @@ export default function AboutSystem() {
       {/* —— 版本与更新 —— */}
       <div className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-4">
         <div className="flex flex-wrap items-center gap-3">
-          <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-[var(--color-primary)] text-xl text-white">¥</div>
+          <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-[var(--color-primary)] text-xl text-[var(--color-primary-foreground)]">¥</div>
           <div className="min-w-0 flex-1">
             <h3 className="font-semibold">个人记账</h3>
             <p className="text-sm text-muted">版本 {formatAppVersion()}</p>

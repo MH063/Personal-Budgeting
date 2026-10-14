@@ -10,7 +10,9 @@ export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
 }
 
 const variants: Record<Variant, string> = {
-  default: 'bg-[var(--color-primary)] text-white hover:opacity-90',
+  // 主色底（浅色深板岩 / 暗色近白）上的文字必须用前景变量；
+  // 历史缺陷：硬编码 text-white 会在暗色下变成「白底白字」而不可见。
+  default: 'bg-[var(--color-primary)] text-[var(--color-primary-foreground)] hover:opacity-90',
   outline: 'border bg-transparent hover:bg-black/5 dark:hover:bg-white/5',
   ghost: 'bg-transparent hover:bg-black/5 dark:hover:bg-white/5',
   danger: 'bg-[var(--color-danger)] text-white hover:opacity-90',

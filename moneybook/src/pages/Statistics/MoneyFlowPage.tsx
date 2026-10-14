@@ -101,7 +101,7 @@ export default function MoneyFlowPage() {
             key={d.key}
             onClick={() => setDim(d.key)}
             className="rounded-lg px-3 py-1.5 text-sm"
-            style={dim === d.key ? { background: 'var(--color-primary)', color: '#fff' } : { border: '1px solid var(--border)', color: 'var(--muted)' }}
+            style={dim === d.key ? { background: 'var(--color-primary)', color: 'var(--color-primary-foreground)' } : { border: '1px solid var(--border)', color: 'var(--muted)' }}
           >
             {d.label}
           </button>

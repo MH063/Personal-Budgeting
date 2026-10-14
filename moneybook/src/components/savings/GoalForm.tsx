@@ -118,7 +118,7 @@ export default function GoalForm({ open, onOpenChange, editTarget }: {
                     onClick={() => toggleAccount(a.id)}
                     className={`flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-left text-sm transition-colors ${checked ? 'border-[var(--color-primary)] bg-[var(--color-primary)]/10' : 'border-[var(--border)]'}`}
                   >
-                    <span className={`h-4 w-4 shrink-0 rounded border flex items-center justify-center text-[10px] ${checked ? 'bg-[var(--color-primary)] border-[var(--color-primary)] text-white' : 'border-[var(--border)] text-transparent'}`}>✓</span>
+                    <span className={`h-4 w-4 shrink-0 rounded border flex items-center justify-center text-[10px] ${checked ? 'bg-[var(--color-primary)] border-[var(--color-primary)] text-[var(--color-primary-foreground)]' : 'border-[var(--border)] text-transparent'}`}>✓</span>
                     <span className="truncate">{a.icon} {a.name}</span>
                   </button>
                 );

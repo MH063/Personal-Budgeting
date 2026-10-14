@@ -30,10 +30,15 @@ const DIM_OPTIONS: { value: AnalysisDimension; label: string }[] = [
 ];
 const DIM_STORE_KEY = DIM_KEY;
 
-const priorityMeta: Record<1 | 2 | 3, { label: string; color: string; border: string; bg: string }> = {
-  1: { label: '高优先', color: '#EF4444', border: 'var(--color-danger)/40', bg: 'var(--color-danger)/10' },
-  2: { label: '中优先', color: '#F59E0B', border: 'rgba(245,158,11,.4)', bg: 'rgba(245,158,11,.1)' },
-  3: { label: '低优先', color: 'var(--color-primary)', border: 'var(--color-primary)/40', bg: 'var(--color-primary)/10' },
+// 优先度配色：color 为标识色，fg 为「该色作底时」的文字色。
+// 历史缺陷：低优先色的标识底用的是主题主色，暗色下主色翻转为近白，
+// 若文字沿用硬编码 text-white 就会「白底白字」不可见，故单独给出 fg。
+// 另：border/bg 此前写成 'var(--color-primary)/40' 这类 inline 值并非合法 CSS，
+// 会被浏览器整条丢弃，改用 color-mix 才能真正生效。
+const priorityMeta: Record<1 | 2 | 3, { label: string; color: string; fg: string; border: string; bg: string }> = {
+  1: { label: '高优先', color: '#EF4444', fg: '#fff', border: 'color-mix(in srgb, #EF4444 40%, transparent)', bg: 'color-mix(in srgb, #EF4444 10%, transparent)' },
+  2: { label: '中优先', color: '#F59E0B', fg: '#fff', border: 'rgba(245,158,11,.4)', bg: 'rgba(245,158,11,.1)' },
+  3: { label: '低优先', color: 'var(--color-primary)', fg: 'var(--color-primary-foreground)', border: 'color-mix(in srgb, var(--color-primary) 40%, transparent)', bg: 'color-mix(in srgb, var(--color-primary) 10%, transparent)' },
 };
 
 function diffColor(v: number | null) {
@@ -65,7 +70,7 @@ export default function MonthlyCheckup() {
               key={o.value}
               type="button"
               onClick={() => setDim(o.value)}
-              className={`rounded-md px-2.5 py-1 text-xs transition ${dim === o.value ? 'bg-[var(--color-primary)] text-white' : 'text-muted hover:bg-black/5 dark:hover:bg-white/5'}`}
+              className={`rounded-md px-2.5 py-1 text-xs transition ${dim === o.value ? 'bg-[var(--color-primary)] text-[var(--color-primary-foreground)]' : 'text-muted hover:bg-black/5 dark:hover:bg-white/5'}`}
             >
               {o.label}
             </button>
@@ -175,7 +180,7 @@ function LocalDiagnosisPanel({ d }: { d: LocalDiagnosis }) {
               const p = priorityMeta[a.priority];
               return (
                 <div key={i} className="flex items-start gap-3 rounded-lg border px-3 py-2.5 text-sm" style={{ borderColor: p.border, background: p.bg }}>
-                  <span className="mt-0.5 shrink-0 rounded px-1.5 py-0.5 text-xs text-white" style={{ background: p.color }}>{p.label}</span>
+                  <span className="mt-0.5 shrink-0 rounded px-1.5 py-0.5 text-xs" style={{ background: p.color, color: p.fg }}>{p.label}</span>
                   <div className="min-w-0">
                     <div className="font-medium" style={{ color: p.color }}>{a.title}</div>
                     <div className="text-xs leading-relaxed text-muted">{a.detail}</div>

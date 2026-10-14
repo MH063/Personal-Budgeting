@@ -116,7 +116,7 @@ export default function SavingsPage() {
       <PageHeader
         title="储蓄目标"
         description="设定目标并定期存入"
-        action={<button onClick={() => { setEditGoal(null); setFormOpen(true); }} className="rounded-lg px-3 py-1.5 text-sm text-white" style={{ background: 'var(--color-primary)' }}>+ 新建目标</button>}
+        action={<button onClick={() => { setEditGoal(null); setFormOpen(true); }} className="rounded-lg px-3 py-1.5 text-sm text-[var(--color-primary-foreground)]" style={{ background: 'var(--color-primary)' }}>+ 新建目标</button>}
       />
       {/* 批量管理条：勾选多个目标后一次删除 */}
       {!isLoading && goals.length > 1 && (
@@ -152,7 +152,7 @@ export default function SavingsPage() {
                 {manageMode && (
                   <span
                     className={`absolute left-2 top-2 z-10 flex h-5 w-5 items-center justify-center rounded border text-xs ${
-                      sel ? 'border-[var(--color-primary)] bg-[var(--color-primary)] text-white' : 'border-[var(--border)] bg-[var(--card)] text-transparent'
+                      sel ? 'border-[var(--color-primary)] bg-[var(--color-primary)] text-[var(--color-primary-foreground)]' : 'border-[var(--border)] bg-[var(--card)] text-transparent'
                     }`}
                   >
                     ✓
@@ -193,7 +193,7 @@ export default function SavingsPage() {
                       onClick={() => setToAccountId(aid)}
                       className={`flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-left text-sm ${active ? 'border-[var(--color-primary)] bg-[var(--color-primary)]/10' : 'border-[var(--border)]'}`}
                     >
-                      <span className={`h-4 w-4 shrink-0 rounded border flex items-center justify-center text-[10px] ${active ? 'bg-[var(--color-primary)] border-[var(--color-primary)] text-white' : 'border-[var(--border)] text-transparent'}`}>✓</span>
+                      <span className={`h-4 w-4 shrink-0 rounded border flex items-center justify-center text-[10px] ${active ? 'bg-[var(--color-primary)] border-[var(--color-primary)] text-[var(--color-primary-foreground)]' : 'border-[var(--border)] text-transparent'}`}>✓</span>
                       <span className="truncate">{acctName(aid)}</span>
                     </button>
                   );

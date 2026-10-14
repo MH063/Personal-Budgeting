@@ -45,12 +45,16 @@ export default function Dashboard() {
   const thisMonth = trend.find((t) => t.month === dayjs().format('YYYY-MM'));
   const overBudget = budgetVs.filter((b) => b.actual > b.budget_amount);
 
+  // 严重度配色：边框/底色用 color-mix 做透明叠加。
+  // 历史缺陷：此前误把 Tailwind 的「/40」透明度语法写进 inline style
+  // （如 'var(--color-primary)/40'），该值不是合法 CSS 会被浏览器整条丢弃，
+  // 导致边框与底色实际从未生效（亮暗两套主题都受影响）。
   const severityStyles = (s: TodoItem['severity']) =>
     s === 'danger'
-      ? { border: 'var(--color-danger)/50', bg: 'var(--color-danger)/10', color: 'var(--color-danger)' }
+      ? { border: 'color-mix(in srgb, var(--color-danger) 50%, transparent)', bg: 'color-mix(in srgb, var(--color-danger) 10%, transparent)', color: 'var(--color-danger)' }
       : s === 'warning'
-        ? { border: 'var(--color-warning, #F59E0B)/50', bg: 'var(--color-warning, #F59E0B)/10', color: 'var(--color-warning, #F59E0B)' }
-        : { border: 'var(--color-primary)/40', bg: 'var(--color-primary)/10', color: 'var(--color-primary)' };
+        ? { border: 'color-mix(in srgb, var(--color-warning, #F59E0B) 50%, transparent)', bg: 'color-mix(in srgb, var(--color-warning, #F59E0B) 10%, transparent)', color: 'var(--color-warning, #F59E0B)' }
+        : { border: 'color-mix(in srgb, var(--color-primary) 40%, transparent)', bg: 'color-mix(in srgb, var(--color-primary) 10%, transparent)', color: 'var(--color-primary)' };
 
   return (
     <div className="space-y-6">

@@ -248,7 +248,7 @@ export default function CalendarPage() {
                 onClick={() => setSelectedDay(isSelected ? null : day)}
                 className={`relative flex aspect-square flex-col items-center justify-center rounded-lg border text-sm transition-colors
                   ${isToday ? 'border-[var(--color-primary)] font-bold' : 'border-transparent hover:bg-black/5 dark:hover:bg-white/5'}`}
-                style={isToday ? { color: 'var(--color-primary-fg)' } : isSelected ? { background: 'var(--color-primary)', color: '#fff' } : {}}
+                style={isToday ? { color: 'var(--color-primary-fg)' } : isSelected ? { background: 'var(--color-primary)', color: 'var(--color-primary-foreground)' } : {}}
                 title={[planTip, flowTip].filter(Boolean).join('；')}
               >
                 <span>{day}</span>

@@ -20,7 +20,7 @@ export default function StatsNav() {
           end={t.end}
           className={({ isActive }) =>
             `whitespace-nowrap rounded-md px-4 py-1.5 text-sm transition-colors ${
-              isActive ? 'bg-[var(--color-primary)] font-medium text-white shadow-sm' : 'text-[var(--color-primary-fg)] hover:opacity-80'
+              isActive ? 'bg-[var(--color-primary)] font-medium text-[var(--color-primary-foreground)] shadow-sm' : 'text-[var(--color-primary-fg)] hover:opacity-80'
             }`}
         >
           {t.label}

@@ -1,10 +1,12 @@
 /**
  * 暗色模式文字前景修复的回归测试。
  * -----------------------------------------------------------------------------
- * 背景：主色文字此前用深蓝 `#1e6fa9`（text-[var(--color-primary)]），在暗色深底
- * 上对比度不足导致按钮/链接文字看不清。修复方案：新增前景变量
- * `--color-primary-fg`——浅色沿用主色、暗色用更亮的 `#6fc0f0`，并将各文字按钮统一
- * 改用该前景变量。
+ * 现状：`--color-primary` 为主色底用色（浅色 #0f172a 深板岩、暗色 #fafafa 近白），
+ * `--color-primary-fg` 为主色文字用色（取值与主色一致，用于卡片底上的强调文字）；
+ * 而「主色底上的文字」必须用 `--color-primary-foreground`（浅色 #ffffff、
+ * 暗色 #09090b）。
+ * 历史缺陷：曾把 `text-white` 硬编码在主色底按钮上，暗色下主色翻转为近白后形成
+ * 「白底白字」完全不可见。
  * 本测试属于「防回归」护网：断言暗色覆盖存在且更亮、以及相关组件未回退到旧的
  * 深蓝文字写法。纯源码文本校验，不依赖运行环境。
  */
@@ -16,9 +18,9 @@ const ROOT = process.cwd();
 const OLD_TEXT_PRIMARY = 'text-[var(--color-primary)]';
 const NEW_TEXT_PRIMARY_FG = 'text-[var(--color-primary-fg)]';
 /** 浅色默认主色前景（与 @theme 中的 --color-primary-fg 一致） */
-const LIGHT_FG = '#1e6fa9';
-/** 暗色下的更亮前景 */
-const DARK_FG = '#6fc0f0';
+const LIGHT_FG = '#0f172a';
+/** 暗色下的更亮前景（与 .dark 中的 --color-primary-fg 一致） */
+const DARK_FG = '#fafafa';
 
 function readSource(rel: string): string {
   return readFileSync(join(ROOT, rel), 'utf-8');

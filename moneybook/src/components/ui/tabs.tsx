@@ -34,8 +34,9 @@ export function TabsTrigger({ value, children }: { value: string; children: Reac
         isActive ? 'font-medium shadow-sm' : 'hover:opacity-80',
         !isActive && 'text-muted'
       )}
-      // 选中态统一用主题主色作底 + 白字，避免暗色下「浅底浅字」对比度不足（与侧边栏选中态一致）
-      style={isActive ? { background: 'var(--color-primary)', color: '#fff' } : {}}
+      // 选中态统一用主题主色作底 + 前景色（浅色白字 / 暗色近黑字），与侧边栏选中态一致。
+      // 历史缺陷：此处曾硬编码 #fff，暗色主色翻转为近白后形成「白底白字」而不可见。
+      style={isActive ? { background: 'var(--color-primary)', color: 'var(--color-primary-foreground)' } : {}}
     >
       {children}
     </button>

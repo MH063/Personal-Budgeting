@@ -86,7 +86,7 @@ export default function Settings() {
               type="button"
               onClick={() => handleGroupClick(gi)}
               className={`flex items-center gap-1.5 rounded-xl px-3 py-2 text-sm font-medium transition-all
-                ${on ? 'bg-[var(--color-primary)] text-white shadow-sm' : 'text-muted hover:bg-black/5 dark:hover:bg-white/10'}`}
+                ${on ? 'bg-[var(--color-primary)] text-[var(--color-primary-foreground)] shadow-sm' : 'text-muted hover:bg-black/5 dark:hover:bg-white/10'}`}
             >
               <span className={on ? '' : 'opacity-80'}>{g.icon}</span>
               {g.title}

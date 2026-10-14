@@ -44,8 +44,10 @@ export default function AdvancedAnalysis() {
         {data.anomalies.map((a, i) => (
           <div key={`a-${i}`} className="flex items-start gap-2 rounded-lg border px-3 py-2 text-sm"
             style={{
-              borderColor: a.level === 'danger' ? 'var(--color-danger)/50' : 'var(--color-warning, #F59E0B)/50',
-              background: a.level === 'danger' ? 'var(--color-danger)/10' : 'var(--color-warning, #F59E0B)/10',
+              // 历史缺陷：此前写 'var(--color-danger)/50' 这类 inline 值，不是合法 CSS
+              // 会被整条丢弃；改用 color-mix 才能让边框/底色真正生效。
+              borderColor: a.level === 'danger' ? 'color-mix(in srgb, var(--color-danger) 50%, transparent)' : 'color-mix(in srgb, var(--color-warning, #F59E0B) 50%, transparent)',
+              background: a.level === 'danger' ? 'color-mix(in srgb, var(--color-danger) 10%, transparent)' : 'color-mix(in srgb, var(--color-warning, #F59E0B) 10%, transparent)',
             }}>
             <span>{a.level === 'danger' ? '⚠️' : '🁢'}</span>
             <div className="min-w-0">
@@ -57,7 +59,7 @@ export default function AdvancedAnalysis() {
 
         {/* 单笔交易离群 */}
         {data.txAnomalies.map((t, i) => (
-          <div key={`t-${i}`} className="flex items-start gap-2 rounded-lg border border-[var(--color-warning, #F59E0B)/50] bg-[var(--color-warning, #F59E0B)/10] px-3 py-2 text-sm">
+          <div key={`t-${i}`} className="flex items-start gap-2 rounded-lg border border-[var(--color-warning)]/50 bg-[var(--color-warning)]/10 px-3 py-2 text-sm">
             <span>🔎</span>
             <div className="min-w-0">
               <div className="font-medium">{t.categoryName} 单笔 {money(t.amount)}</div>

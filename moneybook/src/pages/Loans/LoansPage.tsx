@@ -103,7 +103,7 @@ export default function LoansPage() {
       <PageHeader
         title="借贷"
         description="管理借出与借入"
-        action={<button onClick={() => { setEditLoan(null); setFormOpen(true); }} className="rounded-lg px-3 py-1.5 text-sm text-white" style={{ background: 'var(--color-primary)' }}>+ 建立借贷</button>}
+        action={<button onClick={() => { setEditLoan(null); setFormOpen(true); }} className="rounded-lg px-3 py-1.5 text-sm text-[var(--color-primary-foreground)]" style={{ background: 'var(--color-primary)' }}>+ 建立借贷</button>}
       />
       
       <div className="mb-6 space-y-4">
@@ -158,7 +158,7 @@ export default function LoansPage() {
                 {manageMode && (
                   <span
                     className={`absolute left-2 top-2 z-10 flex h-5 w-5 items-center justify-center rounded border text-xs ${
-                      sel ? 'border-[var(--color-primary)] bg-[var(--color-primary)] text-white' : 'border-[var(--border)] bg-[var(--card)] text-transparent'
+                      sel ? 'border-[var(--color-primary)] bg-[var(--color-primary)] text-[var(--color-primary-foreground)]' : 'border-[var(--border)] bg-[var(--card)] text-transparent'
                     }`}
                   >
                     ✓

@@ -111,7 +111,7 @@ export default function TrashPage() {
         <button
           type="button"
           onClick={() => setEntity(undefined)}
-          className={`rounded-full px-3 py-1 text-xs ${!entity ? 'text-white' : 'bg-black/5 dark:bg-white/10 text-muted'}`}
+          className={`rounded-full px-3 py-1 text-xs ${!entity ? 'text-[var(--color-primary-foreground)]' : 'bg-black/5 dark:bg-white/10 text-muted'}`}
           style={!entity ? { background: 'var(--color-primary)' } : {}}
         >
           全部
@@ -123,7 +123,7 @@ export default function TrashPage() {
               key={e}
               type="button"
               onClick={() => setEntity(on ? undefined : e)}
-              className={`rounded-full px-3 py-1 text-xs ${on ? 'text-white' : 'bg-black/5 dark:bg-white/10 text-muted'}`}
+              className={`rounded-full px-3 py-1 text-xs ${on ? 'text-[var(--color-primary-foreground)]' : 'bg-black/5 dark:bg-white/10 text-muted'}`}
               style={on ? { background: 'var(--color-primary)' } : {}}
             >
               {TRASH_LABEL[e]}

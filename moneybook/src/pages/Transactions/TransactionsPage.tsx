@@ -70,7 +70,7 @@ export default function TransactionsPage() {
         action={
           <button
             onClick={() => { setEditTarget(null); setOpen(true); }}
-            className="rounded-lg px-3 py-1.5 text-sm text-white"
+            className="rounded-lg px-3 py-1.5 text-sm text-[var(--color-primary-foreground)]"
             style={{ background: 'var(--color-primary)' }}
           >
             ＋ 记{label}
@@ -84,7 +84,7 @@ export default function TransactionsPage() {
             key={t.value}
             type="button"
             onClick={() => switchType(t.value)}
-            className={`whitespace-nowrap rounded-md px-4 py-1.5 text-sm transition-colors ${t.value === active ? 'bg-[var(--color-primary)] font-medium text-white shadow-sm' : 'text-[var(--color-primary-fg)] hover:opacity-80'}`}
+            className={`whitespace-nowrap rounded-md px-4 py-1.5 text-sm transition-colors ${t.value === active ? 'bg-[var(--color-primary)] font-medium text-[var(--color-primary-foreground)] shadow-sm' : 'text-[var(--color-primary-fg)] hover:opacity-80'}`}
           >
             {t.label}
           </button>

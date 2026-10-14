@@ -41,7 +41,7 @@ export function LedgerSwitcher() {
                   key={l.id}
                   onClick={() => doSwitch(l.id)}
                   className={`flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm ${l.id === currentId ? '' : 'hover:bg-black/5 dark:hover:bg-white/5'}`}
-                  style={l.id === currentId ? { background: 'var(--color-primary)', color: '#fff' } : {}}
+                  style={l.id === currentId ? { background: 'var(--color-primary)', color: 'var(--color-primary-foreground)' } : {}}
                 >
                   <span>{l.icon}</span>
                   <span>{l.name}</span>

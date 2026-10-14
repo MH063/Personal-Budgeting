@@ -111,7 +111,7 @@ export default function AccountsPage() {
             >
               {recalcBusy ? '重算中…' : '重算账户余额'}
             </button>
-            <button onClick={handleNew} className="rounded-lg px-3 py-1.5 text-sm text-white" style={{ background: 'var(--color-primary)' }}>
+            <button onClick={handleNew} className="rounded-lg px-3 py-1.5 text-sm text-[var(--color-primary-foreground)]" style={{ background: 'var(--color-primary)' }}>
               + 新建账户
             </button>
           </div>
