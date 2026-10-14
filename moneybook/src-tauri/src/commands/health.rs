@@ -85,8 +85,8 @@ fn refresh_snapshot(path: &std::path::Path, bak: &std::path::Path) {
 ///    此时绝不自动恢复，否则会误伤正在被占用的正常库；
 ///  - Some(true)：完整；
 ///  - Some(false)：SQLite 能打开但内部不一致（确认损坏）。
-/// rusqlite::Connection::open 每次都会自动执行 WAL 恢复，故本检查天然包含
-/// 「先恢复上次异常退出遗留的 -wal」这一步。
+///    rusqlite::Connection::open 每次都会自动执行 WAL 恢复，故本检查天然包含
+///    「先恢复上次异常退出遗留的 -wal」这一步。
 fn integrity_status(path: &std::path::Path) -> Option<bool> {
     let conn = Connection::open(path).ok()?;
     match conn.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0)) {
@@ -120,7 +120,7 @@ pub fn ensure_db_health(app: &tauri::AppHandle) -> Result<String, String> {
     match integrity_status(&path) {
         Some(true) => {
             refresh_snapshot(&path, &bak);
-            return Ok("ok".to_string());
+            Ok("ok".to_string())
         }
         Some(false) => {
             // 2) 确认损坏路径（SQLite 能打开但 integrity_check 非 ok）：
@@ -141,7 +141,7 @@ pub fn ensure_db_health(app: &tauri::AppHandle) -> Result<String, String> {
                 }
             }
             println!("[health] 快照恢复失败，重建空库（原库已隔离保留在 .corrupt.*）");
-            return Ok("recreated".to_string());
+            Ok("recreated".to_string())
         }
         None => {
             // 3) 无法打开：大概率是另一实例尚未完全退出、仍持锁，或文件被占用。
@@ -149,7 +149,7 @@ pub fn ensure_db_health(app: &tauri::AppHandle) -> Result<String, String> {
             eprintln!(
                 "[health] 数据库无法打开（可能被其他实例占用），跳过自愈，交由正常启动流程处理"
             );
-            return Ok("locked".to_string());
+            Ok("locked".to_string())
         }
     }
 }

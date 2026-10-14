@@ -190,7 +190,7 @@ pub fn migrate_to_portable(app: tauri::AppHandle) -> Result<String, String> {
     #[cfg(debug_assertions)]
     {
         let _ = &app;
-        return Err("开发构建不支持便携迁移（仅安装版可用）".to_string());
+        Err("开发构建不支持便携迁移（仅安装版可用）".to_string())
     }
 
     #[cfg(not(debug_assertions))]

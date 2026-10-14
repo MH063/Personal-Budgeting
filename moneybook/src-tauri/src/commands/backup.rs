@@ -84,7 +84,7 @@ fn is_system_reserved(target: &Path) -> bool {
 /// 校验路径可用作备份/恢复：
 /// 1) 可信白名单（应用数据目录 + 用户目录）直接放行；
 /// 2) 放宽：任意磁盘路径放行，但排除系统保留目录（Windows/Program Files/安装目录）。
-/// need_exist=true（备份源）：整路径须存在；false（备份目标）：父目录须可访问且文件名合法。
+///    need_exist=true（备份源）：整路径须存在；false（备份目标）：父目录须可访问且文件名合法。
 fn check_allowed(app: &tauri::AppHandle, path: &str, need_exist: bool) -> Result<(), String> {
     let p = Path::new(path);
     let target = if need_exist {

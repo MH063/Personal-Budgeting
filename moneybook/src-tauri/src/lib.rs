@@ -132,7 +132,7 @@ pub fn run() {
         .setup(|app| {
             // 启动即做数据完整性自检与自愈（在插件连接接手前校准库文件）
             let handle = app.handle();
-            let status = commands::health::ensure_db_health(&handle);
+            let status = commands::health::ensure_db_health(handle);
             match status {
                 Ok(s) => {
                     // 记录自检结论（正常/恢复/重建），便于事后排查
