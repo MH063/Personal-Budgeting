@@ -269,6 +269,7 @@ export async function downloadUpdate(
       headers: {
         'Cache-Control': 'no-cache',
         'Pragma': 'no-cache',
+        'User-Agent': `moneybook-updater/${APP_VERSION}`,
       },
     });
     
