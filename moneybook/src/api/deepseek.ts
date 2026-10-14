@@ -28,6 +28,7 @@
  */
 import { readAIConfig } from '@/stores/useAIStore';
 import { httpFetch } from '@/lib/http';
+import { capMaxTokens } from './llm';
 
 /** 判断某 Base URL 是否指向 DeepSeek（余额/文件管理仅 DeepSeek 提供） */
 export function isDeepSeekHost(baseURL: string): boolean {
@@ -116,6 +117,13 @@ export interface FIMCompletion {
   choices: FIMCompletionChoice[];
 }
 
+/**
+ * FIM 补全的默认 max_tokens（历史缺陷：此前默认 128，中文记账语句极易被截断成半句）。
+ * 中文一个汉字常占 1~2 token，128 token 仅够 60~100 字，故默认提高到 512；
+ * 调用方显式传入时仍经 capMaxTokens 做上下限保护。
+ */
+const FIM_DEFAULT_MAX_TOKENS = 512;
+
 /** 使用 FIM 接口让模型补全文本（续写/中段插入）。实时失败抛出带提示的错误。 */
 export async function completeFIM(req: FIMRequest): Promise<FIMResult> {
   const c = readAIConfig();
@@ -127,7 +135,7 @@ export async function completeFIM(req: FIMRequest): Promise<FIMResult> {
     model: req.model || 'deepseek-chat',
     prompt: req.prompt,
     ...(req.suffix ? { suffix: req.suffix } : {}),
-    max_tokens: req.max_tokens ?? 128,
+    max_tokens: capMaxTokens(req.max_tokens) ?? FIM_DEFAULT_MAX_TOKENS,
     temperature: req.temperature ?? 0.5,
     ...(req.top_p != null ? { top_p: req.top_p } : {}),
   };

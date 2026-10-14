@@ -29,6 +29,7 @@ export async function exportToCsv(params: ExportParams): Promise<string> {
     r.date,
     typeLabel(r.type),
     r.amount,
+    r.amortize_months > 0 ? `${r.amount} (分${r.amortize_months}期)` : r.amount,
     r.account_name,
     r.to_account_name ?? '',
     r.note ?? '',
@@ -37,7 +38,7 @@ export async function exportToCsv(params: ExportParams): Promise<string> {
   
   if (!data.length) return '区间内暂无交易记录，无可导出数据';
   
-  const headers = ['日期', '类型', '金额', '账户', '目标账户', '备注', '分类'];
+  const headers = ['日期', '类型', '金额', '摊销信息', '账户', '目标账户', '备注', '分类'];
   const saved = await downloadCSV(`transactions_${params.from}_${params.to}.csv`, headers, data);
   if (saved === null) return '已取消导出';
   return `已导出 ${data.length} 条记录${saved === '已触发下载' ? '' : `，文件已保存`}`;
@@ -103,9 +104,9 @@ export async function exportToPdf(params: ExportParams): Promise<string> {
       ...cats.map((c) => `${c.icon} ${c.name}: ${c.total}`),
       '',
       '===== 交易明细 =====',
-      '日期\t类型\t金额\t账户\t目标账户\t备注\t分类',
+      '日期\t类型\t金额\t摊销信息\t账户\t目标账户\t备注\t分类',
       ...rows.map((r) =>
-        `${r.date}\t${typeLabel(r.type)}\t${r.amount}\t${r.account_name}\t${r.to_account_name ?? ''}\t${r.note ?? ''}\t${r.category_name ?? ''}`
+        `${r.date}\t${typeLabel(r.type)}\t${r.amount}\t${r.amortize_months > 0 ? `分${r.amortize_months}期` : '-'}\t${r.account_name}\t${r.to_account_name ?? ''}\t${r.note ?? ''}\t${r.category_name ?? ''}`
       ),
     ];
     downloadText(`report_${params.from}_${params.to}.txt`, `\uFEFF${lines.join('\n')}`);
@@ -124,13 +125,14 @@ export async function exportToPdf(params: ExportParams): Promise<string> {
         `<td>${csvToHtml(r.date)}</td>` +
         `<td>${csvToHtml(typeLabel(r.type))}</td>` +
         `<td style="text-align:right">${r.amount}</td>` +
+        `<td style="text-align:center">${r.amortize_months > 0 ? `分${r.amortize_months}期` : '-'}</td>` +
         `<td>${csvToHtml(r.account_name)}</td>` +
         `<td>${csvToHtml(r.to_account_name ?? '')}</td>` +
         `<td>${csvToHtml(r.note ?? '')}</td>` +
         `<td>${csvToHtml(r.category_name ?? '')}</td>` +
         `</tr>`
       ).join('')
-    : '<tr><td colspan="7" style="text-align:center;color:#888">区间内无交易记录</td></tr>';
+    : '<tr><td colspan="8" style="text-align:center;color:#888">区间内无交易记录</td></tr>';
 
   const html = `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -165,7 +167,7 @@ export async function exportToPdf(params: ExportParams): Promise<string> {
   <table><thead><tr><th>分类</th><th>金额</th></tr></thead><tbody>${categoryRows}</tbody></table>
   <h2>交易明细</h2>
   <table>
-    <thead><tr><th>日期</th><th>类型</th><th>金额</th><th>账户</th><th>目标账户</th><th>备注</th><th>分类</th></tr></thead>
+    <thead><tr><th>日期</th><th>类型</th><th>金额</th><th>摊销</th><th>账户</th><th>目标账户</th><th>备注</th><th>分类</th></tr></thead>
     <tbody>${txRows}</tbody>
   </table>
 </body>

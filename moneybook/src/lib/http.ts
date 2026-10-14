@@ -51,3 +51,64 @@ export async function httpFetch(input: string, init?: RequestInit): Promise<Resp
     throw e;
   }
 }
+
+/**
+ * 「超时 + 外部取消」复合信号守卫。
+ *
+ * 背景（问题根因）：AI 对话请求此前没有超时，一旦服务端长时间不响应，界面会一直转圈无法恢复。
+ * 这里统一提供超时能力，并额外区分两种中止语义，便于上层给出不同提示：
+ *   - 超时中止（timedOut=true）→ 提示「请求超时，请重试」；
+ *   - 外部取消（timedOut=false 但 signal 已 abort，如用户点停止/切换会话）→ 静默按取消处理。
+ *
+ * 实现说明：刻意不使用 `AbortSignal.timeout` / `AbortSignal.any`——部分 WebView（旧版 Windows
+ * WebView2、旧版 macOS WKWebView）与旧 Node 尚未实现，直接调用会抛 TypeError；改用
+ * AbortController + setTimeout 自行组合，兼容性最好。
+ */
+export interface TimeoutGuard {
+  /** 传给 fetch 的信号（同时承载「超时中止」与「外部取消」） */
+  signal: AbortSignal;
+  /** 是否由超时触发中止（true=超时；false 且 signal.aborted 则为外部取消） */
+  timedOut: () => boolean;
+  /** 重置计时器：流式场景每次收到数据时调用，实现「空闲超时」而非「总时长超时」 */
+  touch: () => void;
+  /** 清理计时器与外部监听（请求结束务必调用，避免定时器泄漏） */
+  cleanup: () => void;
+}
+
+/**
+ * 构建可超时、可外部取消的 AbortSignal。
+ * @param timeoutMs 超时毫秒数（对流式请求即「空闲超时」阈值）
+ * @param external  外部取消信号（可选，用户停止/切换会话时级联中止本次请求）
+ */
+export function createTimeoutGuard(timeoutMs: number, external?: AbortSignal): TimeoutGuard {
+  const controller = new AbortController();
+  let timedOut = false;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+
+  // 计时到点：标记超时并中止请求
+  const arm = () => {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
+  };
+  // 外部取消 → 级联中止（不计入超时，保留「用户取消」语义）
+  const onExternalAbort = () => controller.abort();
+  if (external) {
+    if (external.aborted) controller.abort();
+    else external.addEventListener('abort', onExternalAbort, { once: true });
+  }
+  arm();
+
+  return {
+    signal: controller.signal,
+    timedOut: () => timedOut,
+    touch: () => { if (!timedOut) arm(); },
+    cleanup: () => {
+      if (timer) clearTimeout(timer);
+      timer = null;
+      external?.removeEventListener('abort', onExternalAbort);
+    },
+  };
+}

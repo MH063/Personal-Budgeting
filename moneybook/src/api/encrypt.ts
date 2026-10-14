@@ -11,6 +11,11 @@
  *
  * 说明：本系统仅运行于本机桌面（Tauri），不使用任何 localStorage / sessionStorage，
  *       旧版浏览器端的「会话密钥」兼容迁移逻辑已随方案B一并移除。
+ *
+ * 风险说明（设备指纹不可迁移）：
+ *   - 加密密钥由本机指纹（持久 token + 屏幕/UA 特征）派生，与设备绑定；
+ *   - 换机、重装、清库或设备指纹变化后，旧密文将**无法解密**（表现为读取 Key 失败）；
+ *   - 因此 DB 备份迁移时必须连 settings 表中的设备 token 一并迁移，否则密文不可用。
  */
 import { getKV, setKV, hydrateKV } from './kv';
 import { DEVICE_TOKEN_KEY } from '@/lib/constants';
@@ -32,17 +37,19 @@ function b64Decode(b64: string): Uint8Array<ArrayBuffer> {
   return out;
 }
 
-/** 稳定获取（必要时生成并持久化）设备指纹 token，使指纹跨会话稳定 */
+/**
+ * 稳定获取（必要时生成并持久化）设备指纹 token，使指纹跨会话稳定。
+ * 安全要求：设备指纹直接决定派生密钥，禁止降级为 Math.random 这类可预测弱随机
+ * （历史缺陷：旧实现以弱随机兜底，等于给密文强度开后门）。缺失 Web Crypto 时明确报错。
+ */
 function getDeviceToken(): string {
-  try {
-    const exist = getKV(DEVICE_TOKEN_KEY);
-    if (exist) return exist;
-    const id = (globalThis as { crypto?: Crypto }).crypto?.randomUUID?.() ?? `dev-${Math.random().toString(36).slice(2)}-${Date.now().toString(36)}`;
-    setKV(DEVICE_TOKEN_KEY, id);
-    return id;
-  } catch {
-    return `dev-${Math.random().toString(36).slice(2)}`;
-  }
+  const c = (globalThis as { crypto?: Crypto }).crypto;
+  if (!c?.randomUUID) throw new Error('当前环境不支持 Web Crypto，无法生成加密所需的设备指纹');
+  const exist = getKV(DEVICE_TOKEN_KEY);
+  if (exist) return exist;
+  const id = c.randomUUID();
+  setKV(DEVICE_TOKEN_KEY, id);
+  return id;
 }
 
 /** 拼接设备指纹（多特征 + 持久 token），同一设备稳定 */
@@ -95,7 +102,11 @@ async function decryptWith(key: CryptoKey, enc: string): Promise<string> {
 export async function encryptText(plain: string): Promise<string> {
   const key = await getKey();
   const s = await subtle();
-  const iv = (globalThis as { crypto?: Crypto }).crypto!.getRandomValues(new Uint8Array(12));
+  // IV 必须来自安全随机源；此处显式判空，替换原先的 `crypto!` 非空断言，
+  // 避免在不支持 Web Crypto 的环境下抛出难定位的运行时错误。
+  const wc = (globalThis as { crypto?: Crypto }).crypto;
+  if (!wc?.getRandomValues) throw new Error('当前环境不支持 Web Crypto，无法生成加密 IV');
+  const iv = wc.getRandomValues(new Uint8Array(12));
   const padded = new TextEncoder().encode(plain);
   const ct = await s.encrypt({ name: 'AES-GCM', iv }, key, padded);
   return `${b64Encode(iv)}.${b64Encode(new Uint8Array(ct))}`;

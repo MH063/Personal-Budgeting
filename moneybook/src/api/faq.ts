@@ -1,6 +1,7 @@
 import dayjs from 'dayjs';
 import { readAIConfig } from '@/stores/useAIStore';
 import { sanitizeForClassification } from '@/lib/sanitize';
+import { clipChatHistory, truncateToTokens } from '@/lib/tokenBudget';
 import { chat, type ChatMessageInput } from './llm';
 import { parseCriteriaLocal } from './aiSearch';
 import { getCategoryDistribution } from './stats';
@@ -105,6 +106,14 @@ export async function buildFacts(q: string): Promise<FaqFacts> {
 
 const money = (v: number) => `¥${v.toFixed(2)}`;
 
+/**
+ * 历史消息上送的 token 预算（总量 / 单条）。
+ * 与 AiAssistantDialog 的对话历史口径保持一致；此处再裁一次作为「兜底保护」——
+ * 若上游调用方漏裁或直接传入超长历史，也不会把请求撑爆（已裁剪时幂等无害）。
+ */
+const FAQ_HISTORY_BUDGET_TOKENS = 1200;
+const FAQ_HISTORY_MSG_TOKENS = 500;
+
 /** 生成本地确定性的中文答案（可单测的核心文案）。 */
 export function textAnswer(f: FaqFacts, q: string): string {
   const windowLabel = `${f.range.from} ~ ${f.range.to}`;
@@ -180,11 +189,14 @@ export async function answerFinancialQuestion(
       // 附一份"系统数据概览"，让 AI 能结合整体灵活回答（仍全部为脱敏聚合，不含明细）
       const overview = await buildSystemOverview();
       const user = `问题：${trimmed}\n【当前问题数据】（脱敏聚合）：\n${ctx}\n【系统数据概览】（脱敏）：\n${overview}`;
-      // 组装多轮消息：系统 → 历史(脱敏) → 当前问题+新事实
-      const hist = (opts.history ?? []).map((h) => ({
-        role: h.role,
-        content: sanitizeForClassification(h.content),
-      })) as ChatMessageInput[];
+      // 组装多轮消息：系统 → 历史(脱敏 + token 预算裁剪) → 当前问题+新事实
+      const hist = clipChatHistory(
+        (opts.history ?? []).map((h) => ({
+          role: h.role,
+          content: truncateToTokens(sanitizeForClassification(h.content), FAQ_HISTORY_MSG_TOKENS),
+        })) as ChatMessageInput[],
+        FAQ_HISTORY_BUDGET_TOKENS
+      );
       const messages: ChatMessageInput[] = [{ role: 'system', content: FAQ_SYSTEM }, ...hist, { role: 'user', content: user }];
       const reply = await chat(messages);
       if (reply && reply.trim()) return { answer: reply.trim(), source: 'ai' };

@@ -21,7 +21,7 @@ import { listCategories } from '@/api/categories';
 import { suggestForText, type SuggestResult, classifyConfidence } from '@/api/aiSuggest';
 import { getBudgetVsActualAdvanced } from '@/api/stats';
 import { computeBudgetUsage, getUsageForCategory, budgetWarnMessage, type BudgetUsage } from '@/lib/budgetGuard';
-import { resolveBookDate, listTransactions, type TransactionDetail } from '@/api/transactions';
+import { resolveBookDate, listTransactions, normalizeAmortizeMonths, type TransactionDetail } from '@/api/transactions';
 import { listTemplates, createTemplate, templateToForm, type TxnTemplate, type TxnTemplatePayload } from '@/api/txnTemplate';
 import { recommendTags, recommendMerchant } from '@/api/autocomplete';
 import { listTags, listTagsByTransactions } from '@/api/tags';
@@ -43,7 +43,9 @@ const schema = z.object({
   orderNo: z.string().optional(),
   merchantOrderNo: z.string().optional(),
   tagIds: z.array(z.number()).optional(),
-  amortizeMonths: z.coerce.number().min(0).optional(),
+  // 摊销月数：与后端 normalizeAmortizeMonths 口径一致，仅允许 0（不摊销）或 2..120 的整数；
+  // 上限用 zod 明确拦截（原先只写了 min(0)，超 120 会直接落库并被摊销 SQL 计算为 NULL）
+  amortizeMonths: z.coerce.number().min(0).max(120, '摊销月数不能超过 120').optional(),
 })
 // 必填校验（需求：金额/分类/账户/日期/订单号以红色 * 标识并按类型动态生效）：
 //  - 金额、账户、日期：全部类型必填（编辑时已预填，正常不会缺）；
@@ -283,7 +285,8 @@ export default function TransactionForm({ open, onOpenChange, defaultType = 'exp
         orderNo: d.orderNo || undefined,
         merchantOrderNo: d.merchantOrderNo || undefined,
         tagIds: d.tagIds ?? [],
-        amortizeMonths: d.type === 'expense' ? (d.amortizeMonths ?? 0) : 0,
+        // 摊销月数保存前归一：非法值（<2 或 >120、NaN/小数）统一回退为 0，与后端口径一致
+        amortizeMonths: d.type === 'expense' ? normalizeAmortizeMonths(d.amortizeMonths) : 0,
       };
       if (isEditing && editTarget) {
         await update.mutateAsync({ id: editTarget.id, p: payload });

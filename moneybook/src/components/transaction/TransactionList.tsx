@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { toast } from 'sonner';
+import dayjs from 'dayjs';
 import { listTransactionsDetailed, type TransactionDetail } from '@/api/transactions';
 import { useAccounts } from '@/hooks/useAccounts';
 import { useCategories } from '@/hooks/useCategories';
@@ -122,7 +123,7 @@ export default function TransactionList({ type, onEdit }: { type?: string; onEdi
     // 金额列带符号反映对净资产的影响（收入 +、支出/借出/还出 -、转账 0），
     // 另设独立的收入/支出列，方便按方向筛选汇总。
     const saved = await downloadCSV(
-      `交易记录_${new Date().toISOString().slice(0, 10)}.csv`,
+      `交易记录_${dayjs().format('YYYY-MM-DD')}.csv`,
       ['日期', '类型', '分类', '账户', '备注', '支付时间', '付款方式', '收款方全称', '订单号', '商家订单号', '金额', '收入', '支出'],
       rows.map((r) => [
         formatDate(r.date),

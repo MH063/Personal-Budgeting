@@ -56,7 +56,8 @@ export default function BudgetManage() {
 
   async function onCreate() {
     if (!amount || Number(amount) <= 0) { toast.error('请输入有效金额'); return; }
-    const start = new Date().toISOString().slice(0, 10);
+    // 预算起始日取本地「今天」（toISOString 为 UTC，东八区早 8 点前会差一天）
+    const start = dayjs().format('YYYY-MM-DD');
     await execute(
       `INSERT INTO budgets (category_id, amount, period, start_date, ledger_id) VALUES ($1,$2,$3,$4,$5)`,
       [categoryId ? Number(categoryId) : null, Number(amount), period, start, currentLedgerId()]

@@ -1,3 +1,4 @@
+import dayjs from 'dayjs';
 import { execute, select } from './db';
 import { currentLedgerId } from '@/lib/ledger';
 import type { TxPayload } from './transactions';
@@ -156,7 +157,8 @@ export function applyTemplateToTx(
   t: TxnTemplate,
   opts: { amount: number; today?: string }
 ): TxPayload {
-  const today = opts.today ?? new Date().toISOString().slice(0, 10);
+  // 归属日取本地「今天」（toISOString 为 UTC，东八区早 8 点前会差一天）；显式传入 today 时优先用它
+  const today = opts.today ?? dayjs().format('YYYY-MM-DD');
   return {
     type: t.type,
     amount: opts.amount,

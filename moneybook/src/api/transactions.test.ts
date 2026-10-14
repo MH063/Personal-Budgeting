@@ -3,7 +3,7 @@
  * 覆盖 validateTxPayload：类型/金额/账户/日期/转账转入账户的合法性与错误提示。
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { validateTxPayload, resolveBookDate, createTransaction, updateTransaction, recalcAccountBalances, type TxPayload } from './transactions';
+import { validateTxPayload, resolveBookDate, normalizeAmortizeMonths, createTransaction, updateTransaction, recalcAccountBalances, type TxPayload } from './transactions';
 import { execute, select } from './db';
 import { setCurrentLedger } from '@/lib/ledger';
 
@@ -129,6 +129,54 @@ describe('resolveBookDate：日期与支付时间联动', () => {
   it('date 与 payTime 均为空时返回空串', () => {
     expect(resolveBookDate('', '')).toBe('');
     expect(resolveBookDate('', undefined)).toBe('');
+  });
+});
+
+describe('normalizeAmortizeMonths / validateTxPayload 摊销月数校验', () => {
+  // 背景缺陷：非法 amortize_months 会让预测模块摊销 SQL 的 date() 返回 NULL，
+  // 该笔支出在所有月份静默消失；此组用例锁定「归一化」与「校验拦截」两道防线。
+  it('合法值原样返回：0 表示不摊销，2..120 为有效期数', () => {
+    expect(normalizeAmortizeMonths(0)).toBe(0);
+    expect(normalizeAmortizeMonths(2)).toBe(2);
+    expect(normalizeAmortizeMonths(12)).toBe(12);
+    expect(normalizeAmortizeMonths(120)).toBe(120);
+  });
+
+  it('非法值（NaN/小数/负数/1/超上限/非数值）一律回退为 0', () => {
+    expect(normalizeAmortizeMonths(NaN)).toBe(0);
+    expect(normalizeAmortizeMonths(3.5)).toBe(0);
+    expect(normalizeAmortizeMonths(-6)).toBe(0);
+    expect(normalizeAmortizeMonths(1)).toBe(0);
+    expect(normalizeAmortizeMonths(121)).toBe(0);
+    expect(normalizeAmortizeMonths(undefined)).toBe(0);
+    expect(normalizeAmortizeMonths('abc')).toBe(0);
+  });
+
+  it('缺省/0/合法期数通过校验，非法期数被拦截并给出提示', () => {
+    expect(validateTxPayload(valid)).toBeNull();
+    expect(validateTxPayload({ ...valid, amortizeMonths: 0 })).toBeNull();
+    expect(validateTxPayload({ ...valid, amortizeMonths: 12 })).toBeNull();
+    expect(validateTxPayload({ ...valid, amortizeMonths: NaN })).toBe('摊销月数需为 0 或 2~120 之间的整数');
+    expect(validateTxPayload({ ...valid, amortizeMonths: 1 })).toBe('摊销月数需为 0 或 2~120 之间的整数');
+    expect(validateTxPayload({ ...valid, amortizeMonths: 200 })).toBe('摊销月数需为 0 或 2~120 之间的整数');
+  });
+
+  it('createTransaction 写入合法期数时参数位写入归一后的值', async () => {
+    vi.mocked(execute).mockClear();
+    setCurrentLedger(1);
+    await createTransaction({ ...valid, amortizeMonths: 12 });
+    const call = vi.mocked(execute).mock.calls.find(([sql]) => String(sql).includes('INSERT INTO transactions'));
+    const params = call![1] as unknown[];
+    expect(params[13]).toBe(12);
+  });
+
+  it('createTransaction 直接拒绝非法期数，脏值不会落库', async () => {
+    vi.mocked(execute).mockClear();
+    setCurrentLedger(1);
+    await expect(createTransaction({ ...valid, amortizeMonths: NaN }))
+      .rejects.toThrow('摊销月数需为 0 或 2~120 之间的整数');
+    // 校验在事务前拦截，不应产生任何 INSERT
+    expect(vi.mocked(execute).mock.calls.some(([sql]) => String(sql).includes('INSERT INTO transactions'))).toBe(false);
   });
 });
 

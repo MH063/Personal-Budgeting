@@ -1,7 +1,7 @@
 import dayjs from 'dayjs';
 import { readAIConfig, useAIStore } from '@/stores/useAIStore';
 import { getKV, setKV } from './kv';
-import { httpFetch, isAbortError } from '@/lib/http';
+import { httpFetch, isAbortError, createTimeoutGuard } from '@/lib/http';
 import { isTauriRuntime } from '@/lib/runtime';
 import { getInsights, getCategoryDistribution, getNetWorth } from './stats';
 import { select } from './db';
@@ -12,6 +12,7 @@ import type { FlowAnalysis, FlowDimension } from './moneyflow';
 import { useKnowledgeStore } from '@/stores/useKnowledgeStore';
 import { reconDiffSummary, type BankRow, type ReconItem } from './reconciliation';
 import { currentLedgerId } from '@/lib/ledger';
+import { estimateTokens, clipLinesToBudget } from '@/lib/tokenBudget';
 
 /**
  * 隐私与安全说明（调用方必须遵守）：
@@ -32,6 +33,21 @@ const PRIVACY_GUARD = `安全约束（必须遵守）：
 
 const NO_AUTH_ERROR = '未启用或未配置 AI：请先在「设置 → AI 助手」填写接口地址、模型与 Key。';
 
+/**
+ * 请求超时保护（历史缺陷：chat/chatStream 此前无超时，服务端长时间无响应会让界面一直转圈）。
+ * - CHAT_TIMEOUT_MS：非流式请求的总超时。LLM 完整生成可能较慢，给足 120s，避免误伤慢模型。
+ * - STREAM_IDLE_TIMEOUT_MS：流式请求的「空闲超时」——只在长时间收不到任何数据片时判定超时；
+ *   正常生成期间每收到一片就会刷新计时（见 chatStream 中 timeoutGuard.touch()），不会误伤长回答。
+ * 注意：本模块内已有变量名 `guard`（系统提示消息），故超时守卫变量统一命名为 `timeoutGuard`。
+ */
+export const CHAT_TIMEOUT_MS = 120_000;
+export const STREAM_IDLE_TIMEOUT_MS = 60_000;
+
+/** 构造超时提示文案（供 chat / chatStream 复用，保证文案一致） */
+function timeoutMessage(stage: '响应' | '数据', ms: number, baseURL: string): string {
+  return `AI 请求超时：${baseURL} 在 ${Math.round(ms / 1000)}s 内未返回${stage}，请检查网络或稍后重试`;
+}
+
 /** 单次请求的 max_tokens 上/下限保护：防止误配置过大导致服务端拒绝或超长计费 */
 export const MAX_TOKENS_CAP = 32768;
 const MAX_TOKENS_FLOOR = 1;
@@ -42,18 +58,29 @@ export function capMaxTokens(v: number | null | undefined): number | undefined {
   return Math.min(Math.max(Math.floor(v), MAX_TOKENS_FLOOR), MAX_TOKENS_CAP);
 }
 
-/** 把知识库内容拼成可选的 system 提示片段（无条目时返回空串） */
+/** 知识库拼入 system 提示的最大 token 预算（条目数不限，超出预算时只保留靠前条目） */
+const KNOWLEDGE_TOKEN_BUDGET = 2000;
+
+/** 知识库片段的固定标题（单独抽出，便于预算中计入其占用的 token） */
+const KNOWLEDGE_HEADER =
+  '\n\n【参考知识库】（当且仅当与用户问题相关时参考；与用户实际数据冲突时以用户数据为准；不得编造知识库之外的事实）：\n';
+
+/**
+ * 把知识库内容拼成可选的 system 提示片段（无条目时返回空串）。
+ * 历史缺陷：此前直接拼接全部知识条目、无任何长度上限；知识库较大时会撑爆请求体。
+ * 现按 token 预算裁剪，仅保留靠前条目并标注被省略的数量（详见 lib/tokenBudget.ts）。
+ */
 function knowledgeBlock(): string {
   const es = useKnowledgeStore.getState().entries;
-  const content = es
-    .map((e) => (e.title.trim() || e.content.trim()) && `【${e.title.trim() || '未命名知识'}】\n${e.content.trim()}`)
-    .filter(Boolean)
-    .join('\n\n');
-  if (!content) return '';
-  return (
-    '\n\n【参考知识库】（当且仅当与用户问题相关时参考；与用户实际数据冲突时以用户数据为准；不得编造知识库之外的事实）：\n' +
-    content
-  );
+  const items = es
+    .map((e) => ((e.title.trim() || e.content.trim()) ? `【${e.title.trim() || '未命名知识'}】\n${e.content.trim()}` : ''))
+    .filter(Boolean) as string[];
+  if (!items.length) return '';
+  const { text, omitted } = clipLinesToBudget(items, KNOWLEDGE_TOKEN_BUDGET, {
+    headerTokens: estimateTokens(KNOWLEDGE_HEADER),
+    separator: '\n\n',
+  });
+  return KNOWLEDGE_HEADER + text + (omitted > 0 ? `\n\n（另有 ${omitted} 条知识因超出长度限制未随请求发送。）` : '');
 }
 
 /** 系统提示 = 隐私约束 + 知识库 */
@@ -219,6 +246,91 @@ export interface ChatMessageInput {
   content: string;
 }
 
+/**
+ * 可重试错误（网络错误 / HTTP 429 / 5xx）。
+ * 背景（历史缺陷）：chat 此前一次失败即抛错，偶发的网络抖动或服务端 5xx 会直接失败，
+ * 而这类错误天然具备「重试即可成功」的性质，故新增有限重试（见 chat 重试循环）。
+ */
+class RetryableChatError extends Error {}
+/** 不可重试错误（认证/参数等 4xx、响应格式异常、用户取消）：直接抛出，不发起重试 */
+class FatalChatError extends Error {}
+
+/** 非流式 chat 的最大重试次数（不含首次请求）：仅在可重试错误时按指数退避重试 */
+export const CHAT_MAX_RETRIES = 2;
+/** 重试退避基数（毫秒）：第 n 次重试等待 base × 3^(n-1)，即 500ms → 1500ms */
+const CHAT_RETRY_BASE_MS = 500;
+
+/** 计算第 retryIndex 次重试（从 1 计）的退避时长 */
+function chatRetryDelayMs(retryIndex: number): number {
+  return CHAT_RETRY_BASE_MS * 3 ** (retryIndex - 1);
+}
+
+/**
+ * 可被外部取消打断的退避等待：正常到点 resolve；等待期间用户取消则 reject('已取消')，
+ * 使重试循环立即终止，不会在用户已放弃后仍继续发请求。
+ */
+function backoffSleep(ms: number, external?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (external?.aborted) { reject(new Error('已取消')); return; }
+    const onAbort = () => { clearTimeout(timer); reject(new Error('已取消')); };
+    const timer = setTimeout(() => {
+      external?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    external?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+/**
+ * 单次非流式请求（含独立超时守卫）。
+ * 失败时按错误性质抛出：RetryableChatError（可重试）/ FatalChatError（不可重试）。
+ * 说明：不把响应正文里的敏感信息回传到界面；状态码映射为中文原因（见 describeAiHttpError）。
+ */
+async function chatOnce(
+  baseURL: string,
+  apiKey: string,
+  body: Record<string, unknown>,
+  opts: { signal?: AbortSignal }
+): Promise<string> {
+  // 超时守卫：超时中止与用户取消语义分开（见 createTimeoutGuard 注释）
+  const timeoutGuard = createTimeoutGuard(CHAT_TIMEOUT_MS, opts.signal);
+  try {
+    const res = await httpFetch(`${baseURL}/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify(body),
+      signal: timeoutGuard.signal,
+    });
+    if (!res.ok) {
+      const msg = `AI 服务返回错误：${describeAiHttpError(res.status, baseURL)}（HTTP ${res.status}）`;
+      // 仅 429（限流）与 5xx（服务端故障）值得重试；其余 4xx 多为参数/认证问题，重试无意义
+      if (res.status === 429 || res.status >= 500) throw new RetryableChatError(msg);
+      throw new FatalChatError(msg);
+    }
+    const data = await res.json();
+    const text = data?.choices?.[0]?.message?.content;
+    if (typeof text !== 'string') throw new FatalChatError('AI 服务返回格式异常');
+    // 本地用量统计：成功响应后累计请求次数与 Tokens（见 recordAiUsage 注释，零成本）
+    recordAiUsage(data?.usage);
+    return text.trim();
+  } catch (e) {
+    // 已判定的业务错误原样抛出，避免被下面的网络错误分支误判为可重试
+    if (e instanceof RetryableChatError || e instanceof FatalChatError) throw e;
+    if (timeoutGuard.timedOut()) throw new RetryableChatError(timeoutMessage('响应', CHAT_TIMEOUT_MS, baseURL));
+    if (isAbortError(e) || opts.signal?.aborted) throw new FatalChatError('已取消');
+    throw new RetryableChatError(`网络错误：无法连接到 ${baseURL}（${(e as Error).message}）`);
+  } finally {
+    timeoutGuard.cleanup();
+  }
+}
+
+/**
+ * 非流式对话：失败时按「可重试错误」做有限次指数退避重试（最多 CHAT_MAX_RETRIES 次）。
+ * 重试边界（刻意保守，避免无意义重发与重复计费）：
+ *   - 重试：网络错误、HTTP 429、5xx；
+ *   - 不重试：其余 4xx（参数/认证问题）、响应格式异常、用户主动取消（opts.signal.aborted）。
+ * 每次重试都新建超时守卫，保证单次请求独立计时，重试之间不影响超时语义。
+ */
 export async function chat(messages: ChatMessageInput[], opts: { signal?: AbortSignal } = {}): Promise<string> {
   const c = readAIConfig();
   if (!c.enabled || !c.baseURL || !c.model || !c.apiKey) throw new Error(NO_AUTH_ERROR);
@@ -235,28 +347,25 @@ export async function chat(messages: ChatMessageInput[], opts: { signal?: AbortS
   const capped = capMaxTokens(c.maxTokens);
   if (capped != null) body.max_tokens = capped;
 
-  let res: Response;
-  try {
-    res = await httpFetch(`${baseURL}/chat/completions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${c.apiKey}` },
-      body: JSON.stringify(body),
-      signal: opts.signal,
-    });
-  } catch (e) {
-    if ((e as Error).name === 'AbortError') throw new Error('已取消');
-    throw new Error(`网络错误：无法连接到 ${baseURL}（${(e as Error).message}）`);
+  let lastErr: Error = new Error('AI 请求失败');
+  for (let attempt = 0; attempt <= CHAT_MAX_RETRIES; attempt++) {
+    if (opts.signal?.aborted) throw new Error('已取消');
+    // 首次请求不等待；重试前按指数退避等待（退避期间被取消则直接终止）
+    if (attempt > 0) {
+      const waitMs = chatRetryDelayMs(attempt);
+      console.warn(`[llm] chat 第 ${attempt} 次重试，退避 ${waitMs}ms 后发送`);
+      await backoffSleep(waitMs, opts.signal);
+    }
+    try {
+      return await chatOnce(baseURL, c.apiKey, body, opts);
+    } catch (e) {
+      lastErr = e as Error;
+      if (!(e instanceof RetryableChatError) || attempt >= CHAT_MAX_RETRIES) throw e;
+      // 关键位置日志：便于在控制台观察重试过程与失败原因
+      console.warn(`[llm] chat 请求失败（第 ${attempt + 1} 次），将重试：`, lastErr.message);
+    }
   }
-  if (!res.ok) {
-    // 不把响应正文里的敏感信息回传到界面；状态码映射为中文原因（见 describeAiHttpError）
-    throw new Error(`AI 服务返回错误：${describeAiHttpError(res.status, baseURL)}（HTTP ${res.status}）`);
-  }
-  const data = await res.json();
-  const text = data?.choices?.[0]?.message?.content;
-  if (typeof text !== 'string') throw new Error('AI 服务返回格式异常');
-  // 本地用量统计：成功响应后累计请求次数与 Tokens（见 recordAiUsage 注释，零成本）
-  recordAiUsage(data?.usage);
-  return text.trim();
+  throw lastErr;
 }
 
 /** 流式对话：逐片回调内容（SSE 风格，兼容 OpenAI 系接口）。隐私约束与 chat 一致。 */
@@ -279,22 +388,40 @@ export async function chatStream(
   if (c.topP != null) body.top_p = c.topP;
   const capped = capMaxTokens(c.maxTokens);
   if (capped != null) body.max_tokens = capped;
-  // 请求流式响应中附带 usage（OpenAI 系标准扩展，用于本地用量统计；不支持的厂商会忽略该字段）
+  // 请求流式响应中附带 usage（OpenAI 系标准扩展，用于本地用量统计）。
+  // 兼容性兜底（历史缺陷：此前无条件添加，遇到不认该字段的服务商会整个流式请求失败）：
+  // 若服务商因该字段返回 400，则去掉该字段重发一次；此时无 usage 返回，recordAiUsage 已做缺失容错。
   body.stream_options = { include_usage: true };
 
   let res: Response;
+  // 超时守卫：流式采用「空闲超时」，每收到一片数据即刷新计时（见下方 timeoutGuard.touch()）
+  const timeoutGuard = createTimeoutGuard(STREAM_IDLE_TIMEOUT_MS, opts.signal);
   try {
     res = await httpFetch(`${baseURL}/chat/completions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${c.apiKey}` },
       body: JSON.stringify(body),
-      signal: opts.signal,
+      signal: timeoutGuard.signal,
     });
+    if (res.status === 400 && 'stream_options' in body) {
+      delete body.stream_options;
+      // 关键位置日志：便于区分「服务商不兼容 stream_options」与其它 400 原因
+      console.warn('[llm] 服务商未接受 stream_options，已去掉该字段重试流式请求');
+      res = await httpFetch(`${baseURL}/chat/completions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${c.apiKey}` },
+        body: JSON.stringify(body),
+        signal: timeoutGuard.signal,
+      });
+    }
   } catch (e) {
+    timeoutGuard.cleanup();
+    if (timeoutGuard.timedOut()) throw new Error(timeoutMessage('响应', STREAM_IDLE_TIMEOUT_MS, baseURL));
     if ((e as Error).name === 'AbortError') throw e;
     throw new Error(`网络错误：无法连接到 ${baseURL}（${(e as Error).message}）`);
   }
   if (!res.ok || !res.body) {
+    timeoutGuard.cleanup();
     throw new Error(`AI 服务返回错误：${describeAiHttpError(res.status, baseURL)}（HTTP ${res.status}）`);
   }
 
@@ -308,6 +435,7 @@ export async function chatStream(
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
+      timeoutGuard.touch(); // 收到数据：刷新空闲计时，避免长回答被误判超时
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split('\n');
       buffer = lines.pop() ?? '';
@@ -330,6 +458,8 @@ export async function chatStream(
       }
     }
   } catch (e) {
+    // 先判超时：空闲超时会以 AbortError 形式抛出，须与「用户取消」区分
+    if (timeoutGuard.timedOut()) throw new Error(timeoutMessage('数据', STREAM_IDLE_TIMEOUT_MS, baseURL));
     // 读取阶段取消：Tauri 插件抛 'Request cancelled' 普通 Error，统一规范为 AbortError
     // 供调用方识别「用户取消」而非网络故障（含中止/切换对话等场景）
     if (isAbortError(e) && !(e instanceof DOMException)) {
@@ -338,11 +468,15 @@ export async function chatStream(
     throw e;
   } finally {
     reader.releaseLock();
+    timeoutGuard.cleanup();
   }
   // 本地用量统计：流式完成后累计请求次数与 Tokens（见 recordAiUsage 注释，零成本）
   recordAiUsage(streamUsage);
   return full.trim();
 }
+
+/** 明细行上送的 token 预算：明细备注长度不可控，除条数上限（40 条）外再做预算裁剪 */
+const DETAIL_TOKEN_BUDGET = 2000;
 
 /**
  * 构建「统计汇总」上下文（不含明细备注）。
@@ -376,7 +510,10 @@ export async function buildAggregateContext(anchorYm: string = dayjs().format('Y
       const lines = rows.map((r) =>
         sanitizeRow({ date: r.date, amount: r.amount, note: r.note, categoryName: r.category_name })
       );
-      ctx += '\n【最近交易明细（已脱敏）】\n' + lines.join('\n');
+      // 明细行长度不可控（备注可能很长），除条数上限外再做 token 预算裁剪，避免撑爆请求体
+      const { text, omitted } = clipLinesToBudget(lines, DETAIL_TOKEN_BUDGET);
+      ctx += '\n【最近交易明细（已脱敏）】\n' + text;
+      if (omitted > 0) ctx += `\n（另有 ${omitted} 条明细因超出长度限制未发送）`;
       ctx += '\n（以上明细备注已做脱敏处理，不含真实手机号、证件号、银行卡、邮箱、地址等个人信息，请仅依据脱敏后的分类与金额作答）';
     }
   }
@@ -621,15 +758,24 @@ export async function buildReconDiffContext(recId: number): Promise<string> {
     return `${maskSensitive(b.summary || '（无摘要）')} ${amt}（${b.date}）`;
   };
 
+  // 各类差异示例行的 token 预算：单行摘要可能很长（如银行流水备注），
+  // 除条数上限（各 10 条）外再做预算裁剪，避免三类示例叠加后撑爆请求体
+  const SAMPLE_TOKEN_BUDGET = 600;
+  /** 把示例数组按 token 预算裁剪并用「；」拼接，超出部分标注省略条数 */
+  const clipExamples = (arr: string[]) => {
+    const { text, omitted } = clipLinesToBudget(arr, SAMPLE_TOKEN_BUDGET, { separator: '；' });
+    return text + (omitted > 0 ? `…（另有 ${omitted} 条未列出）` : '');
+  };
+
   let s = `【银行对账·差异说明】账户 ${maskSensitive(rec.account_name ?? '')}，期间 ${rec.period_start ?? '-'} ~ ${rec.period_end ?? '-'}\n`;
   s += `期初 ${money(rec.opening_balance)}，推算余额 ${rec.calc_balance != null ? money(rec.calc_balance) : '未计算'}，银行余额 ${rec.bank_balance != null ? money(rec.bank_balance) : '未填写'}，差额 ${money(rec.diff_total)}。\n`;
 
   s += `\n银行有·本地无：共 ${diff.bankUnmatched.length} 条` +
-    (diff.bankUnmatched.length ? `，示例：${diff.bankUnmatched.slice(0, 10).map(fmtBank).join('；')}` : '') + '\n';
+    (diff.bankUnmatched.length ? `，示例：${clipExamples(diff.bankUnmatched.slice(0, 10).map(fmtBank))}` : '') + '\n';
   s += `本地有·银行无：共 ${diff.localUnmatchedTotal} 条` +
-    (diff.localUnmatched.length ? `，示例：${diff.localUnmatched.slice(0, 10).map((t) => `${maskSensitive(t.tx_note ?? '（无备注）')} ${money(Math.abs(t.tx_amount ?? 0))}（${t.tx_date ?? '-'}）`).join('；')}` : '') + '\n';
+    (diff.localUnmatched.length ? `，示例：${clipExamples(diff.localUnmatched.slice(0, 10).map((t) => `${maskSensitive(t.tx_note ?? '（无备注）')} ${money(Math.abs(t.tx_amount ?? 0))}（${t.tx_date ?? '-'}）`))}` : '') + '\n';
   s += `金额不符：共 ${diff.amountMismatch.length} 条` +
-    (diff.amountMismatch.length ? `，示例：${diff.amountMismatch.slice(0, 10).map(fmtBank).join('；')}` : '') + '\n';
+    (diff.amountMismatch.length ? `，示例：${clipExamples(diff.amountMismatch.slice(0, 10).map(fmtBank))}` : '') + '\n';
 
   s += '\n（以上摘要/备注已脱敏，仅含汇总与示例；请据此说明差异可能原因与处理建议，不要编造未提供的交易。）';
   return s;

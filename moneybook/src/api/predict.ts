@@ -8,6 +8,12 @@ import { currentLedgerId } from '@/lib/ledger';
  * 依据近 N 个月各分类的历史支出，用「加权移动平均 + 最近趋势」预测下月支出，
  * 并给出每分类的建议预算额度（预测 × 安全系数），帮助用户提前设定预算。
  * 核心预测逻辑为纯函数（predictNext），便于单测；DB 仅负责取近 N 月按分类的月度合计。
+ *
+ * 口径说明（重要）：
+ * fetchMonthlySeries 对 amortize_months > 0 的支出按「amount / 月数」均摊到覆盖的各月，
+ * 因此本模块产出的 lastActual / values 均为「分期摊销后」的月度口径，
+ * 与统计页（stats.ts，不摊销）的直接支出合计数字不一致，属预期差异，非缺陷；
+ * 界面展示时须标注「分期摊销后 / 含分摊」，避免用户误以为与明细对不上。
  */
 
 export interface StepPredict {
@@ -79,10 +85,34 @@ export async function fetchMonthlySeries(type: 'income' | 'expense', months = 6)
   for (let i = 0; i < months; i++) ymList.push(dayjs().subtract(months - i, 'month').format('YYYY-MM'));
 
   const rows = await select<{ name: string; icon: string; color: string; ym: string; amt: number }>(
-    `SELECT c.name, c.icon, c.color, strftime('%Y-%m', t.date) AS ym, SUM(t.amount) AS amt
-     FROM transactions t JOIN categories c ON t.category_id = c.id
-     WHERE t.type = $1 AND t.date BETWEEN $2 AND $3 AND t.ledger_id = $4
-     GROUP BY c.id, ym ORDER BY c.name, ym`,
+    `WITH RECURSIVE
+     months(m) AS (
+       SELECT strftime('%Y-%m', $2)
+       UNION ALL
+       SELECT strftime('%Y-%m', date(m || '-01', '+1 month'))
+       FROM months
+       WHERE m < strftime('%Y-%m', $3)
+     )
+     SELECT c.name, c.icon, c.color, m.m AS ym,
+            COALESCE(SUM(
+              CASE
+                WHEN t.amortize_months > 0 THEN t.amount / t.amortize_months
+                ELSE t.amount
+              END
+            ), 0) AS amt
+     FROM months m
+     CROSS JOIN categories c
+     LEFT JOIN transactions t ON t.type = $1 AND t.ledger_id = $4 AND t.category_id = c.id
+       AND (
+         (t.amortize_months = 0 AND strftime('%Y-%m', t.date) = m.m)
+         OR
+         (t.amortize_months > 0
+          AND strftime('%Y-%m', t.date) <= m.m
+          AND m.m < strftime('%Y-%m', date(t.date, '+' || t.amortize_months || ' months')))
+       )
+     GROUP BY c.id, m.m
+     HAVING amt > 0
+     ORDER BY c.name, ym`,
     [type, start, end, currentLedgerId()]
   );
   const byCat = new Map<string, { name: string; icon: string; color: string; map: Map<string, number> }>();

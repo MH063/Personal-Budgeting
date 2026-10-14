@@ -1,3 +1,4 @@
+import dayjs from 'dayjs';
 import { createTransaction, reverseBalance, syncVirtualAccounts } from './transactions';
 import { execute, runInTransaction, select } from './db';
 import { currentLedgerId } from '@/lib/ledger';
@@ -454,7 +455,8 @@ export async function settleLoan(loanId: number): Promise<void> {
     if (!loan) throw new Error('借贷记录不存在');
     if (loan.status === 'settled') return;
 
-    const today = new Date().toISOString().slice(0, 10);
+    // 结清日期取本地「今天」（toISOString 为 UTC，东八区早 8 点前会差一天）
+    const today = dayjs().format('YYYY-MM-DD');
     // 剩余本金 > 0：补齐一笔结清还款，避免"标记结清但余额仍残留"的不一致
     if (loan.remaining > 0.0001) {
       if (!loan.account_id) throw new Error('该借贷未关联资金账户，无法自动结清剩余金额');

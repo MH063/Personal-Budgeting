@@ -42,7 +42,29 @@ export function resolveBookDate(date?: string, payTime?: string): string {
   return m ? m[1] : '';
 }
 
-/** 校验交易入参（纯函数，便于单元测试）：金额必须为有限正数、账户与日期必填合法、类型合法。
+/**
+ * 归一化「摊销月数」到合法取值（纯函数，便于单测）：非法值一律回退为 0（不摊销）。
+ *
+ * 背景（历史缺陷）：`amortize_months` 参与预测模块 `predict.ts` 的摊销 SQL——
+ *   `date(t.date, '+' || t.amortize_months || ' months')`
+ * 若写入的是 NaN、非整数、负数或超上限值，SQLite 的 `date()` 会返回 NULL，
+ * 该笔支出会「所有月份都不出现」而静默消失；负值则两个分支（=0 / >0）都不命中同样被排除。
+ * 且写入处 `p.amortizeMonths ?? 0` 无法兜住 NaN（`??` 只拦 null/undefined），
+ * 故必须在此显式归一，杜绝非法值落库。
+ *
+ * 合法集合：`0`（不摊销）或 `2..120` 的整数（1 期无意义，与 UI「期数 min=2」口径一致）。
+ * @param v 原始摊销月数（可能为 undefined/NaN/小数/字符串等脏值）
+ * @returns 归一化后的合法摊销月数（0 或 2..120 的整数）
+ */
+export function normalizeAmortizeMonths(v: unknown): number {
+  const n = typeof v === 'number' ? v : Number(v);
+  if (!Number.isFinite(n) || !Number.isInteger(n)) return 0;
+  if (n < 2 || n > 120) return 0;
+  return n;
+}
+
+/** 校验交易入参（纯函数，便于单元测试）：金额必须为有限正数、账户与日期必填合法、类型合法，
+ *  摊销月数（若提供）必须为 0 或 2..120 的整数。
  *  返回错误信息；合法时返回 null。 */
 export function validateTxPayload(p: TxPayload): string | null {
   if (!p || typeof p !== 'object') return '交易参数无效';
@@ -51,6 +73,10 @@ export function validateTxPayload(p: TxPayload): string | null {
   if (!Number.isInteger(p.accountId) || p.accountId <= 0) return '请选择有效账户';
   if (!p.date || !/^\d{4}-\d{2}-\d{2}$/.test(p.date) || Number.isNaN(Date.parse(p.date))) return '日期格式不正确';
   if (p.type === 'transfer' && (!Number.isInteger(p.toAccountId) || !p.toAccountId)) return '转账必须指定转入账户';
+  // 摊销月数：null/undefined 视为不摊销（0）；一旦提供则必须为合法值，防止 NaN/小数/越界值落库导致预测数据静默丢失
+  if (p.amortizeMonths != null && normalizeAmortizeMonths(p.amortizeMonths) !== p.amortizeMonths) {
+    return '摊销月数需为 0 或 2~120 之间的整数';
+  }
   return null;
 }
 
@@ -235,7 +261,7 @@ export async function createTransaction(p: TxPayload): Promise<number> {
       [p.type, p.amount, p.categoryId ?? null, p.accountId, p.toAccountId ?? null,
        p.loanId ?? null, p.date, p.note ?? '',
        p.payTime ?? null, p.payMethod ?? null, p.payee ?? null,
-       p.orderNo ?? null, p.merchantOrderNo ?? null, p.amortizeMonths ?? 0,
+       p.orderNo ?? null, p.merchantOrderNo ?? null, normalizeAmortizeMonths(p.amortizeMonths),
        now, now, currentLedgerId()]
     );
     await assertTransferTarget(p.type, p.toAccountId, p.accountId);
@@ -290,7 +316,7 @@ export async function updateTransaction(id: number, p: TxPayload): Promise<void>
        p.loanId ?? null, p.date, p.note ?? '',
        p.payTime ?? null, p.payMethod ?? null, p.payee ?? null,
        p.orderNo ?? null, p.merchantOrderNo ?? null,
-       p.amortizeMonths ?? 0, new Date().toISOString(), id]
+       normalizeAmortizeMonths(p.amortizeMonths), new Date().toISOString(), id]
     );
     await assertTransferTarget(p.type, p.toAccountId, p.accountId);
     await applyBalance(p);

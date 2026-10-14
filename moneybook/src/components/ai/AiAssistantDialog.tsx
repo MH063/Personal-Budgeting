@@ -24,6 +24,7 @@ import { useCategories } from '@/hooks/useCategories';
 import { useTransactionMutations } from '@/hooks/useTransactions';
 import { Modal } from '@/components/ui/modal';
 import { Button } from '@/components/ui/button';
+import { clipChatHistory, truncateToTokens } from '@/lib/tokenBudget';
 import { TX_TYPES } from '@/lib/constants';
 
 /**
@@ -61,6 +62,10 @@ export default function AiAssistantDialog() {
       : [activeProvider.model, ...baseModels]
     : baseModels;
   const [tab, setTab] = useState<'chat' | 'book'>('chat');
+  // 双 Tab 常驻挂载、请求可并行：汇总两 Tab 的生成状态，用于在另一 Tab 上提示「该 Tab 正在生成」，
+  // 避免用户切走后误以为请求已停止（排查报告 B2）。
+  const [chatBusy, setChatBusy] = useState(false);
+  const [bookBusy, setBookBusy] = useState(false);
 
   // 弹窗常驻挂载于 AppShell：应用启动 / 刷新后从数据库（settings 表）恢复对话历史，
   // 不使用 localStorage（项目约定见 api/kv.ts）。仅挂载时执行一次。
@@ -134,8 +139,12 @@ export default function AiAssistantDialog() {
 
       {/* Tab 导航（跳转设置页前先关闭弹窗，避免弹窗残留遮挡设置页） */}
       <div className="mt-2 flex items-center gap-2 border-b border-white/10 pb-2">
-        <TabBtn active={tab === 'chat'} onClick={() => setTab('chat')}>对话 / 报告</TabBtn>
-        <TabBtn active={tab === 'book'} onClick={() => setTab('book')}>自然语言记账</TabBtn>
+        <TabBtn active={tab === 'chat'} onClick={() => setTab('chat')}>
+          对话 / 报告{tab !== 'chat' && chatBusy ? <BusyHint /> : null}
+        </TabBtn>
+        <TabBtn active={tab === 'book'} onClick={() => setTab('book')}>
+          自然语言记账{tab !== 'book' && bookBusy ? <BusyHint /> : null}
+        </TabBtn>
         <Link to="/settings?tab=ai" onClick={close} className="ml-auto text-xs hover:underline" style={{ color: '#a1a1aa' }}>
           {enabled ? 'AI 设置 →' : '开启 AI →'}
         </Link>
@@ -144,11 +153,11 @@ export default function AiAssistantDialog() {
       <div className="pt-3">
         {/* 两个 Tab 常驻挂载、仅切换显隐：保证一方正在进行的 AI 请求不会因切换 Tab 被中断 */}
         <div className={tab === 'chat' ? '' : 'hidden'}>
-          <ChatTab enabled={enabled} />
+          <ChatTab enabled={enabled} onBusyChange={setChatBusy} />
         </div>
         <div className={tab === 'book' ? '' : 'hidden'}>
           {enabled ? (
-            <BookTab />
+            <BookTab onBusyChange={setBookBusy} />
           ) : (
             <div className="rounded-xl border border-dashed border-white/15 p-4">
               <div className="font-semibold" style={{ color: '#e4e4e7' }}>🤖 自然语言记账需要先开启 AI</div>
@@ -173,6 +182,14 @@ export default function AiAssistantDialog() {
 
 const QUICK_QUERIES = ['上个月花了多少', '上个月餐饮花了多少', '哪类支出增长最快', '这个月收入多少'];
 
+/**
+ * 多轮问答历史的 token 预算（历史总量 / 单条上限）。
+ * 历史裁剪按「用户/助手成对」保留，避免把半条对话发给模型；
+ * 具体估算与裁剪规则见 lib/tokenBudget.ts。
+ */
+const CHAT_HISTORY_BUDGET_TOKENS = 1200;
+const CHAT_HISTORY_MSG_TOKENS = 500;
+
 /** 空模型列表占位（模块级稳定引用）：selector 若每次返回新数组会触发 React 无限重渲染 */
 const EMPTY_MODELS: string[] = [];
 
@@ -191,7 +208,7 @@ type PendingAction =
   | { kind: 'expert'; type: 'report' | 'suggest' | 'diag' | 'forecast' }
   | { kind: 'budget' };
 
-function ChatTab({ enabled }: { enabled: boolean }) {
+function ChatTab({ enabled, onBusyChange }: { enabled: boolean; onBusyChange?: (busy: boolean) => void }) {
   // 由入口携带的分析锚点（月度体检可传用户选定的月份/维度）：体检与预测据此分析对应月份
   const anchor = useAiAssistantStore((s) => s.anchor);
   // 对话历史放 store：切换 Tab / 关闭弹窗重开后仍保留，支撑连续追问
@@ -232,6 +249,12 @@ function ChatTab({ enabled }: { enabled: boolean }) {
   const [budgetUndoToken, setBudgetUndoToken] = useState<string | null>(null);
   const [budgetStatus, setBudgetStatus] = useState<{ kind: 'success' | 'error'; msg: string } | null>(null);
 
+  // 向父级上报本 Tab 的生成状态（对话生成 / 续写 / 预算建议加载）：
+  // 供另一 Tab 显示「生成中」提示，避免用户切走后误以为请求已停止（排查报告 B2）
+  useEffect(() => {
+    onBusyChange?.(sending || fimBusy || budgetLoading);
+  }, [sending, fimBusy, budgetLoading, onBusyChange]);
+
   // 新消息追加后自动滚到底部
   useEffect(() => {
     const el = scrollRef.current;
@@ -252,14 +275,18 @@ function ChatTab({ enabled }: { enabled: boolean }) {
 
   /**
    * 普通问答：本地聚合先给确定答案；启用 AI 时强制走 LLM（仅脱敏聚合事实），
-   * 失败自动回退本地。只带最近 6 条历史（单条截断 500 字）控制上送 token 量。
+   * 失败自动回退本地。历史按「用户/助手成对」+ token 预算裁剪（见 CHAT_HISTORY_* 常量），
+   * 避免半条对话与超长请求（历史缺陷：此前固定 slice(-6) 且单条截断 500 字，不成对、无预算）。
    * 可被「停止」中断：中断后丢弃旧结果（不覆盖「已停止」标记）。
    */
   async function sendQuestion(text: string) {
     const t = text.trim();
     if (!t || sending) return;
     setInput('');
-    const history = msgs.slice(-6).map((m) => ({ role: m.role, content: m.content.slice(0, 500) }));
+    const history = clipChatHistory(
+      msgs.map((m) => ({ role: m.role, content: truncateToTokens(m.content, CHAT_HISTORY_MSG_TOKENS) })),
+      CHAT_HISTORY_BUDGET_TOKENS
+    );
     setMsgs((prev) => [...prev, { role: 'user', content: t }, { role: 'assistant', content: '', pending: true }]);
     setSending(true);
     const ac = new AbortController();
@@ -374,9 +401,11 @@ function ChatTab({ enabled }: { enabled: boolean }) {
         ];
       } else {
         const ctx = await buildAggregateContext();
+        // 脱敏后的汇总数据放在 user 消息中（与 diag/forecast 分支一致）：
+        // 历史缺陷：此前把数据拼进 system，既弱化系统指令的约束力，也不符合消息语义。
         messages = [
-          { role: 'system', content: `${meta.system}\n${ctx}` },
-          { role: 'user', content: meta.user },
+          { role: 'system', content: meta.system },
+          { role: 'user', content: `${meta.user}\n\n数据：\n${ctx}` },
         ];
       }
       await chatStream(messages, { onDelta: appendLast, signal: ac.signal });
@@ -537,6 +566,7 @@ function ChatTab({ enabled }: { enabled: boolean }) {
             <div key={i} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
               <div
                 className={`max-w-[85%] whitespace-pre-wrap rounded-xl px-3 py-2 leading-relaxed ${
+                  // 弹窗容器 .ai-dialog 已将 --color-primary 覆写为蓝色，此处白字在蓝底上始终可读
                   m.role === 'user' ? 'text-white' : 'border border-white/15 bg-white/5'
                 }`}
                 style={m.role === 'user' ? { background: 'var(--color-primary)' } : undefined}
@@ -677,7 +707,7 @@ function ChatTab({ enabled }: { enabled: boolean }) {
 // 自然语言记账 Tab（原仪表盘 AiAssistant 的记账能力，逻辑不变）
 // ---------------------------------------------------------------------------
 
-function BookTab() {
+function BookTab({ onBusyChange }: { onBusyChange?: (busy: boolean) => void }) {
   const [input, setInput] = useState('');
   const [parsing, setParsing] = useState(false);
   const [pendingList, setPendingList] = useState<AiBookItem[]>([]);
@@ -685,6 +715,10 @@ function BookTab() {
   const [bookMsg, setBookMsg] = useState('');
   const [busy, setBusy] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
+  // 向父级上报本 Tab 的生成状态（解析/入账）：供另一 Tab 显示「生成中」提示（排查报告 B2）
+  useEffect(() => {
+    onBusyChange?.(busy || parsing);
+  }, [busy, parsing, onBusyChange]);
   const { create } = useTransactionMutations();
   const { data: accounts = [] } = useAccounts(false);
   const { data: cats = [] } = useCategories();
@@ -866,12 +900,18 @@ function BookTab() {
 // 子组件
 // ---------------------------------------------------------------------------
 
+/** 「另一 Tab 正在生成」提示（排查报告 B2）：双 Tab 常驻挂载、请求可并行，避免用户误以为已停止 */
+function BusyHint() {
+  return <span className="ml-1 text-[10px] font-normal" style={{ color: 'var(--color-primary-fg)' }}>· 生成中</span>;
+}
+
 function TabBtn({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
   return (
     <button
       type="button"
       onClick={onClick}
       className="rounded px-2 py-1 text-sm"
+      // 同上：弹窗内 --color-primary 为蓝色，白色文字可读，保持原样
       style={active ? { background: 'var(--color-primary)', color: '#fff' } : { color: 'var(--muted)' }}
     >
       {children}

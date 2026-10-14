@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { encryptText, decryptText } from '@/api/encrypt';
-import { getRawKV, setKV, removeKV, hydrateKV } from '@/api/kv';
+import { getRawKV, setKV, removeKV, hydrateKV, isKVReady } from '@/api/kv';
 import { AI_CONFIG_KEY } from '@/lib/constants';
 import {
   genId,
@@ -334,25 +334,45 @@ export const useAIStore = create<AIStore>((set, get) => ({
     },
   }));
 
-// 初始化后异步解密：把持久化的 apiKeyEnc 解密回内存明文，供 readAIConfig 同步读取
-setTimeout(() => {
-  (async () => {
-    await hydrateKV();
-    // 延迟一次以吸收首启 hydrate 后 store 初始值（首次即默认值），先用持久化数据重建再解密
-    await Promise.resolve();
-    const s = useAIStore.getState();
-    s.hydrate();
-    for (const p of useAIStore.getState().providers) {
-      if (p.apiKeyEnc && !p.apiKey) {
-        decryptText(p.apiKeyEnc)
-          .then((k) => useAIStore.getState().updateProvider(p.id, { apiKey: k }))
-          .catch(() => {
-            // 解密失败（例如旧会话密钥已清空）则丢弃，等待重新填写
-          });
-      }
+/**
+ * 初始化后异步解密：把持久化的 apiKeyEnc 解密回内存明文，供 readAIConfig 同步读取。
+ *
+ * 历史缺陷（B1）：原实现只调用一次 hydrateKV()。hydrateKV 在数据库尚未就绪的启动窗口内
+ * 会失败并把 hydration 重置为 null（见 kv.ts），此时内存缓存为空 → 下面的 hydrate() 只能
+ * 读成默认的空 provider 列表 → 本会话既没有 apiKey、又不会再重试，导致所有 AI 调用恒定抛
+ * NO_AUTH_ERROR，必须重启应用才能恢复。
+ * 修复：用 isKVReady() 判定载入结果（成功载入后为 true；失败被重置为 null 即 false），
+ * 首次失败延迟重试一次以吸收启动时序抖动；仍失败则明确告警（而非静默失败）。
+ * @param attempt 已尝试次数（内部递归使用）
+ */
+async function bootstrapAIKeys(attempt = 0): Promise<void> {
+  await hydrateKV();
+  if (!isKVReady()) {
+    if (attempt >= 1) {
+      // 重试仍失败：不再无限重试，明确提示本会话 AI 配置可能不可用
+      // eslint-disable-next-line no-console
+      console.warn('[ai] 偏好项载入失败，本会话 AI 配置可能不可用，请重开应用或重新填写 Key');
+      return;
     }
-  })();
-}, 0);
+    await new Promise((r) => setTimeout(r, 800));
+    return bootstrapAIKeys(attempt + 1);
+  }
+  // 延迟一次以吸收首启 hydrate 后 store 初始值（首次即默认值），先用持久化数据重建再解密
+  await Promise.resolve();
+  const s = useAIStore.getState();
+  s.hydrate();
+  for (const p of useAIStore.getState().providers) {
+    if (p.apiKeyEnc && !p.apiKey) {
+      decryptText(p.apiKeyEnc)
+        .then((k) => useAIStore.getState().updateProvider(p.id, { apiKey: k }))
+        .catch(() => {
+          // 解密失败（例如旧会话密钥已清空）则丢弃，等待重新填写
+        });
+    }
+  }
+}
+
+setTimeout(() => { void bootstrapAIKeys(); }, 0);
 
 /** 供非 React 模块（api/llm）同步读取最新配置，避免引入 store 依赖导致循环引用 */
 export function readAIConfig(): AIConfig {

@@ -78,7 +78,7 @@ export default function HealthBudgetSection() {
       ) : (
         <Card className="mt-4 p-4">
           <div className="mb-3 flex flex-wrap gap-4 text-sm">
-            <span className="text-muted">上月支出 <b>{formatMoney(f.totalLast)}</b></span>
+            <span className="text-muted">上月支出（分期摊销后） <b>{formatMoney(f.totalLast)}</b></span>
             <span className="text-muted">下月预测 <b className="text-[var(--color-primary-fg)]">{formatMoney(f.totalPredicted)}</b></span>
             <span className="text-muted">
               变化 <b style={{ color: f.totalPredicted >= f.totalLast ? '#EF4444' : '#10B981' }}>
@@ -92,7 +92,7 @@ export default function HealthBudgetSection() {
               return (
                 <div key={c.name} className="flex items-center gap-2 py-1 text-sm">
                   <span className="w-24 shrink-0 truncate">{c.icon} {c.name}</span>
-                  <span className="w-24 text-muted">上月 {formatMoney(c.lastActual)}</span>
+                  <span className="w-24 text-muted">上月（含分摊） {formatMoney(c.lastActual)}</span>
                   <span className="w-24 font-medium">预测 {formatMoney(c.predicted)}</span>
                   <span className="w-14">
                     {m.icon} {c.momPct != null ? `${c.momPct > 0 ? '+' : ''}${c.momPct}%` : m.label}
