@@ -158,8 +158,8 @@ describe('createTransaction / updateTransaction：5 字段 SQL 拼写（mock 断
     expect(sql).toContain('payee');
     expect(sql).toContain('order_no');
     expect(sql).toContain('merchant_order_no');
-    // 参数共 16 个且 5 字段取值正确（顺序=列顺序，位置 8..12）
-    expect(params).toHaveLength(16);
+    // 参数共 17 个（加上了 amortize_months）且 5 字段取值正确（顺序=列顺序，位置 8..12）
+    expect(params).toHaveLength(17);
     expect(params[8]).toBe('2026-09-27 12:03');
     expect(params[9]).toBe('微信支付');
     expect(params[10]).toBe('某某餐饮店');
@@ -175,7 +175,7 @@ describe('createTransaction / updateTransaction：5 字段 SQL 拼写（mock 断
     await createTransaction({ type: 'expense', amount: 10, accountId: 1, date: '2026-09-28', note: '' });
     const call = vi.mocked(execute).mock.calls.find(([sql]) => String(sql).includes('INSERT INTO transactions'));
     const params = call![1] as unknown[];
-    expect(params).toHaveLength(16);
+    expect(params).toHaveLength(17);
     expect(params[8]).toBeNull();
     expect(params[9]).toBeNull();
     expect(params[10]).toBeNull();
@@ -200,15 +200,15 @@ describe('createTransaction / updateTransaction：5 字段 SQL 拼写（mock 断
     expect(sql).toContain('payee=$11');
     expect(sql).toContain('order_no=$12');
     expect(sql).toContain('merchant_order_no=$13');
-    // 参数 15 个：5 字段在位置 8..12，14 为 id
+    // 参数 16 个（加上了 amortize_months）：5 字段在位置 8..12，15 为 id
     const params = call![1] as unknown[];
-    expect(params).toHaveLength(15);
+    expect(params).toHaveLength(16);
     expect(params[8]).toBe('2026-09-28 09:00');
     expect(params[9]).toBe('支付宝');
     expect(params[10]).toBe('某店');
     expect(params[11]).toBe('O-2');
     expect(params[12]).toBe('M-2');
-    expect(params[14]).toBe(5);
+    expect(params[15]).toBe(5);
   });
 
   it('updateTransaction 未提供 5 字段更新时对应参数补为 null', async () => {
