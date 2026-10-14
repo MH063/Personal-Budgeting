@@ -54,7 +54,6 @@ function fingerprintMaterial(): string {
     nav?.language ?? '',
     scr?.width ?? '',
     scr?.height ?? '',
-    new Date().getTimezoneOffset(),
     getDeviceToken(),
   ].join('|');
 }

@@ -87,7 +87,7 @@ export async function fetchLatestStableRelease(): Promise<ReleaseInfo | null> {
 /** 主路径：读取 Release 资产的 latest.json（Tauri updater 清单，含版本/说明/发布时间） */
 async function fetchLatestJson(signal: AbortSignal): Promise<ReleaseInfo | null> {
   const res = await httpFetch(
-    `https://github.com/${UPDATE_REPO_SLUG}/releases/latest/download/latest.json`,
+    `https://github.com/${UPDATE_REPO_SLUG}/releases/latest/download/latest.json?t=${Date.now()}`,
     {
       method: 'GET',
       headers: {
@@ -95,6 +95,8 @@ async function fetchLatestJson(signal: AbortSignal): Promise<ReleaseInfo | null>
         // 显式携带 User-Agent：GitHub 对缺失 UA 的请求一律 403；Rust 侧 reqwest 默认不带，
         // 历史曾因此直接撞上 403
         'User-Agent': `moneybook-updater/${APP_VERSION}`,
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache',
       },
       signal,
     },
@@ -118,12 +120,14 @@ async function fetchLatestJson(signal: AbortSignal): Promise<ReleaseInfo | null>
 /** 兜底路径：GitHub 公开 API（按创建时间倒序返回 Releases），过滤 draft/prerelease/非正式 tag */
 async function fetchLatestFromApi(signal: AbortSignal): Promise<ReleaseInfo | null> {
   const res = await httpFetch(
-    `https://api.github.com/repos/${UPDATE_REPO_SLUG}/releases?per_page=20`,
+    `https://api.github.com/repos/${UPDATE_REPO_SLUG}/releases?per_page=20&t=${Date.now()}`,
     {
       method: 'GET',
       headers: {
         Accept: 'application/vnd.github+json',
         'User-Agent': `moneybook-updater/${APP_VERSION}`,
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache',
       },
       signal,
     },

@@ -22,6 +22,8 @@ export interface TxPayload {
   /** 商家订单号（可选） */
   merchantOrderNo?: string;
   tagIds?: number[];
+  /** 摊销月数（0表示不摊销） */
+  amortizeMonths?: number;
 }
 
 const VALID_TYPES: TxPayload['type'][] = ['income', 'expense', 'transfer', 'lend', 'borrow', 'repay_in', 'repay_out'];
@@ -98,6 +100,7 @@ export interface Transaction {
   payee: string | null;
   order_no: string | null;
   merchant_order_no: string | null;
+  amortize_months: number;
   created_at: string;
   updated_at: string;
   reconciliation_id?: number | null; // 银行对账归属批次（0 无此字段迁移时undefined）
@@ -226,13 +229,13 @@ export async function createTransaction(p: TxPayload): Promise<number> {
     const result = await execute(
       `INSERT INTO transactions
         (type, amount, category_id, account_id, to_account_id, loan_id, date, note,
-         pay_time, pay_method, payee, order_no, merchant_order_no,
+         pay_time, pay_method, payee, order_no, merchant_order_no, amortize_months,
          created_at, updated_at, ledger_id)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
       [p.type, p.amount, p.categoryId ?? null, p.accountId, p.toAccountId ?? null,
        p.loanId ?? null, p.date, p.note ?? '',
        p.payTime ?? null, p.payMethod ?? null, p.payee ?? null,
-       p.orderNo ?? null, p.merchantOrderNo ?? null,
+       p.orderNo ?? null, p.merchantOrderNo ?? null, p.amortizeMonths ?? 0,
        now, now, currentLedgerId()]
     );
     await assertTransferTarget(p.type, p.toAccountId, p.accountId);
@@ -281,13 +284,13 @@ export async function updateTransaction(id: number, p: TxPayload): Promise<void>
         type=$1, amount=$2, category_id=$3, account_id=$4, to_account_id=$5,
         loan_id=$6, date=$7, note=$8,
         pay_time=$9, pay_method=$10, payee=$11, order_no=$12, merchant_order_no=$13,
-        updated_at=$14
-       WHERE id=$15`,
+        amortize_months=$14, updated_at=$15
+       WHERE id=$16`,
       [p.type, p.amount, p.categoryId ?? null, p.accountId, p.toAccountId ?? null,
        p.loanId ?? null, p.date, p.note ?? '',
        p.payTime ?? null, p.payMethod ?? null, p.payee ?? null,
        p.orderNo ?? null, p.merchantOrderNo ?? null,
-       new Date().toISOString(), id]
+       p.amortizeMonths ?? 0, new Date().toISOString(), id]
     );
     await assertTransferTarget(p.type, p.toAccountId, p.accountId);
     await applyBalance(p);
@@ -488,6 +491,7 @@ export async function reverseBalance(p: Transaction) {
     type: p.type, amount: p.amount, categoryId: p.category_id ?? undefined,
     accountId: p.account_id, toAccountId: p.to_account_id ?? undefined,
     loanId: p.loan_id ?? undefined, date: p.date, note: p.note,
+    amortizeMonths: p.amortize_months,
   };
   switch (p.type) {
     case 'income': neg.type = 'expense'; break;

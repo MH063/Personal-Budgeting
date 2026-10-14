@@ -202,11 +202,11 @@ export async function bulkImportTransactions(rows: ImportRow[], opts: { autoCrea
     for (const a of await select<RefAccount>(`SELECT id, name FROM accounts WHERE ledger_id = $1`, [lid])) accMap.set(a.name, a.id);
     for (const c of await select<RefCategory>(`SELECT id, name, type FROM categories`)) catMap.set(`${c.name}|${c.type}`, c.id);
 
-    // 去重：已在本账本库中的订单号集合 + 本次批次已出现的（订单号 / 无订单指纹），防止重复导入重复入账
+    // 去重：跨账本订单号检测（如果同一订单号存在于当前账本则拦截；如果存在于其他账本，则同样拦截，避免同份账单被重复导入到不同账本）
     let duplicates = 0;
     const existingOrders = new Set(
       (await select<{ order_no: string }>(
-        `SELECT order_no FROM transactions WHERE ledger_id = $1 AND order_no IS NOT NULL AND order_no <> ''`, [lid]
+        `SELECT order_no FROM transactions WHERE order_no IS NOT NULL AND order_no <> ''`
       )).map((o) => o.order_no)
     );
     const batchOrders = new Set<string>();

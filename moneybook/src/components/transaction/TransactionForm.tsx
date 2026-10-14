@@ -27,6 +27,8 @@ import { recommendTags, recommendMerchant } from '@/api/autocomplete';
 import { listTags, listTagsByTransactions } from '@/api/tags';
 import type { AiBookItem } from '@/api/aiBook';
 
+import { Switch } from '@/components/ui/switch';
+
 const schema = z.object({
   type: z.enum(['income', 'expense', 'transfer', 'lend', 'borrow']),
   amount: z.coerce.number().positive('金额必须大于 0'),
@@ -41,6 +43,7 @@ const schema = z.object({
   orderNo: z.string().optional(),
   merchantOrderNo: z.string().optional(),
   tagIds: z.array(z.number()).optional(),
+  amortizeMonths: z.coerce.number().min(0).optional(),
 })
 // 必填校验（需求：金额/分类/账户/日期/订单号以红色 * 标识并按类型动态生效）：
 //  - 金额、账户、日期：全部类型必填（编辑时已预填，正常不会缺）；
@@ -159,6 +162,7 @@ export default function TransactionForm({ open, onOpenChange, defaultType = 'exp
         payee: editTarget.payee ?? '',
         orderNo: editTarget.order_no ?? '',
         merchantOrderNo: editTarget.merchant_order_no ?? '',
+        amortizeMonths: editTarget.amortize_months ?? 0,
         tagIds: [],
       });
     } else {
@@ -175,6 +179,7 @@ export default function TransactionForm({ open, onOpenChange, defaultType = 'exp
         payee: '',
         orderNo: '',
         merchantOrderNo: '',
+        amortizeMonths: 0,
         tagIds: [],
       });
     }
@@ -278,6 +283,7 @@ export default function TransactionForm({ open, onOpenChange, defaultType = 'exp
         orderNo: d.orderNo || undefined,
         merchantOrderNo: d.merchantOrderNo || undefined,
         tagIds: d.tagIds ?? [],
+        amortizeMonths: d.type === 'expense' ? (d.amortizeMonths ?? 0) : 0,
       };
       if (isEditing && editTarget) {
         await update.mutateAsync({ id: editTarget.id, p: payload });
@@ -306,6 +312,7 @@ export default function TransactionForm({ open, onOpenChange, defaultType = 'exp
         payee: '',
         orderNo: '',
         merchantOrderNo: '',
+        amortizeMonths: 0,
         tagIds: [],
       });
       onOpenChange(false);
@@ -616,6 +623,38 @@ export default function TransactionForm({ open, onOpenChange, defaultType = 'exp
             </div>
           </div>
         </div>
+
+        {type === 'expense' && (
+          <div className="rounded-lg border border-[var(--border)] p-3">
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="text-sm font-medium">大额支出分期摊销</div>
+                <div className="text-xs text-muted">将这笔大额支出按月平摊至图表与报表中</div>
+              </div>
+              <Switch
+                checked={form.watch('amortizeMonths')! > 0}
+                onChange={(c) => form.setValue('amortizeMonths', c ? 12 : 0, { shouldDirty: true })}
+              />
+            </div>
+            {form.watch('amortizeMonths')! > 0 && (
+              <div className="mt-3 flex items-center gap-2">
+                <span className="text-sm text-muted">摊销期数：</span>
+                <Input
+                  type="number"
+                  className="w-24"
+                  min={2}
+                  max={120}
+                  value={form.watch('amortizeMonths')}
+                  onChange={(e) => form.setValue('amortizeMonths', parseInt(e.target.value) || 0, { shouldDirty: true })}
+                />
+                <span className="text-sm text-muted">个月</span>
+                <span className="ml-auto text-xs text-muted">
+                  ≈ ¥{(Number(form.watch('amount')) / (form.watch('amortizeMonths') || 1)).toFixed(2)} / 月
+                </span>
+              </div>
+            )}
+          </div>
+        )}
 
         <Button type="submit" className="w-full" disabled={pending}>
           {pending ? '保存中…' : '保存'}
