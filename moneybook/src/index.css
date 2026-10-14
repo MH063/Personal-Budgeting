@@ -16,6 +16,11 @@
   --bg: #f4f4f5; /* 更柔和的现代亮色底 (zinc-100) */
   --fg: #18181b; /* zinc-900 */
   --card: #ffffff;
+  /* 卡片 RGB 分量（供 rgba() 做半透明毛玻璃背景使用）。
+     历史缺陷：Topbar / Sidebar 用 rgba(var(--card-rgb), 0.7) 但该变量从未定义，
+     导致整条表达式的 alpha 为空、背景声明被浏览器判为无效，毛玻璃效果实际一直失效。
+     此处补齐亮/暗两套值（与 --card 保持一致）。 */
+  --card-rgb: 255, 255, 255;
   --muted: #71717a; /* zinc-500 */
   --border: #e4e4e7; /* zinc-200 */
   --danger: #ef4444;
@@ -29,8 +34,12 @@
   --bg: #09090b; /* zinc-950 */
   --fg: #fafafa; /* zinc-50 */
   --card: #18181b; /* zinc-900 */
+  --card-rgb: 24, 24, 27;
   --muted: #a1a1aa; /* zinc-400 */
   --border: #27272a; /* zinc-800 */
+  /* 暗色下主色反转为近白（accent），因此「主色底」上的文字必须用
+     --color-primary-foreground（暗色为近黑），不能硬编码 text-white，
+     否则会出现「白底白字」不可见（历史缺陷）。 */
   --color-primary: #fafafa;
   --color-primary-foreground: #09090b;
   --color-primary-fg: #fafafa;

@@ -33,7 +33,7 @@ export default function AiAssistant() {
           <button
             type="button"
             onClick={() => openAssistant()}
-            className="rounded-lg px-3 py-1.5 text-sm text-white hover:opacity-90"
+            className="rounded-lg px-3 py-1.5 text-sm text-[var(--color-primary-foreground)] hover:opacity-90"
             style={{ background: 'var(--color-primary)' }}
           >
             打开 AI 助手

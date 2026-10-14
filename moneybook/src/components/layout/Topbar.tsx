@@ -65,7 +65,7 @@ export default function Topbar() {
 
           <button
             onClick={() => setFormOpen(true)}
-            className="flex items-center gap-1.5 rounded-xl px-4 py-2 text-sm font-semibold text-white shadow-md transition-all hover:scale-105 hover:shadow-lg active:scale-95"
+            className="flex items-center gap-1.5 rounded-xl px-4 py-2 text-sm font-semibold text-[var(--color-primary-foreground)] shadow-md transition-all hover:scale-105 hover:shadow-lg active:scale-95"
             style={{ background: 'var(--color-primary)' }}
           >
             <Plus size={16} strokeWidth={3} /> 记一笔

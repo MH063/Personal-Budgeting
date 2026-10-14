@@ -32,7 +32,7 @@ export default function Sidebar() {
       }}
     >
       <div className="flex h-16 items-center justify-center gap-2 px-4 font-bold" style={{ color: 'var(--color-primary)' }}>
-        <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-[var(--color-primary)] text-white shadow-sm">
+        <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-[var(--color-primary)] text-[var(--color-primary-foreground)] shadow-sm">
           <span className="text-sm leading-none">M</span>
         </div>
         {!collapsed && <span className="text-lg tracking-tight text-[var(--fg)]">MoneyBook</span>}
@@ -46,7 +46,7 @@ export default function Sidebar() {
             className={({ isActive }) =>
               `group relative mb-1 flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition-all duration-200 ${
                 isActive
-                  ? 'bg-[var(--color-primary)] text-white shadow-md'
+                  ? 'bg-[var(--color-primary)] text-[var(--color-primary-foreground)] shadow-md'
                   : 'text-muted hover:bg-black/5 hover:text-[var(--fg)] dark:hover:bg-white/10'
               }`
             }
