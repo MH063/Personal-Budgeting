@@ -250,13 +250,9 @@ export interface UpdateInstallCallbacks {
   onReady?: () => void;
 }
 
-let cachedUpdateResource: import('@tauri-apps/plugin-updater').Update | null = null;
+import { check, Update } from '@tauri-apps/plugin-updater';
 
-import { invoke } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
-
-/** 缓存下载完成的 ZIP 路径 */
-let cachedUpdateZipPath: string | null = null;
+let cachedUpdateResource: Update | null = null;
 
 /**
  * 步骤一：后台下载更新包。
@@ -268,26 +264,41 @@ export async function downloadUpdate(
 ): Promise<void> {
   if (!isTauriRuntime()) throw new Error('当前环境不支持应用内更新，请前往下载页手动安装');
 
-  const zipUrl = `https://github.com/${UPDATE_REPO_SLUG}/releases/download/v${expectedVersion}/moneybook-update-windows.zip`;
-
-  // 监听下载进度
-  const unlistenStarted = await listen<{ downloaded: number; total: number }>('update-download-started', (e) => {
-    callbacks.onProgress?.(e.payload.downloaded, e.payload.total);
-  });
-  const unlistenProgress = await listen<{ downloaded: number; total: number }>('update-download-progress', (e) => {
-    callbacks.onProgress?.(e.payload.downloaded, e.payload.total);
-  });
-
   try {
-    const zipPath = await invoke<string>('download_update_custom', { url: zipUrl });
-    cachedUpdateZipPath = zipPath;
+    const update = await check({
+      headers: {
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache',
+      },
+    });
+    
+    if (!update) {
+      throw new Error(`未发现更新版本 (期望: v${expectedVersion})`);
+    }
+
+    let contentLength = 0;
+    let downloaded = 0;
+
+    await update.download((event) => {
+      switch (event.event) {
+        case 'Started':
+          contentLength = event.data.contentLength || 0;
+          callbacks.onProgress?.(downloaded, contentLength);
+          break;
+        case 'Progress':
+          downloaded += event.data.chunkLength;
+          callbacks.onProgress?.(downloaded, contentLength);
+          break;
+        case 'Finished':
+          break;
+      }
+    });
+
+    cachedUpdateResource = update;
     callbacks.onReady?.();
   } catch (error) {
     console.error('下载更新包失败:', error);
     throw new Error('下载更新包失败，请检查网络或稍后重试');
-  } finally {
-    unlistenStarted();
-    unlistenProgress();
   }
 }
 
@@ -296,12 +307,11 @@ export async function downloadUpdate(
  * 针对 Windows 走双进程无感守护更新，替代默认 NSIS 安装条
  */
 export async function applyUpdate(): Promise<void> {
-  if (!cachedUpdateZipPath) {
+  if (!cachedUpdateResource) {
     throw new Error('找不到已下载的更新包资源');
   }
   
-  // 调起 Rust 写的微型更新器，主程序会自动退出
-  await invoke('apply_update_custom', { zipPath: cachedUpdateZipPath });
+  await cachedUpdateResource.install();
 }
 
 /**
