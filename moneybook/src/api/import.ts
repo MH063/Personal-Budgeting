@@ -4,8 +4,9 @@ import { currentLedgerId } from '@/lib/ledger';
 import { listAccounts } from '@/api/accounts';
 import { listCategories } from '@/api/categories';
 import { loadUserRules } from './merchantNorm';
-import { categorizeWithRules } from './builtinCategory';
+import { categorizeWithRules, classifyBuiltinCategory } from './builtinCategory';
 import { classifyBillDirection, cleanAmount, detectSplitColumns } from './billColumns';
+import { DEFAULT_CATEGORIES } from './factoryReset';
 
 /**
  * 导入可产生的交易类型：
@@ -122,7 +123,9 @@ export function matchImportRule(text: string, rules: ImportRule[] = []): ImportR
  * 背景（历史缺陷）：归类规则原本只在交易录入的 AI 建议环节生效，导入账单时完全不参与，
  * 用户加了「星巴克 => 咖啡」后导入仍不会归到咖啡——同一意图「文本→分类」被拆成两条互不相通的路径。
  * 现统一收口：资金流向规则未给出分类时，先查用户归类规则，再查内置词典兜底（未开 AI 也有基础分类）；
- * 账单自带分类（如支付宝「交易分类」）的行保持不动（来源优先级更高）。
+ * 账单自带分类（如支付宝「交易分类」）的行此处保持不动（来源优先级更高），
+ * 由落库阶段的 resolveImportCategory「三级收敛」接管：精确命中 → 内置词典兜底 → 自动创建，
+ * 避免「餐饮美食」这类别名被直接新建成分类（分类膨胀主因）。
  */
 function applyUserCategoryRules(rows: ImportRow[]): void {
   const rules = loadUserRules();
@@ -159,6 +162,85 @@ function normalizeFingerprintNote(note?: string): string {
 }
 
 /**
+ * 分类名归一化：trim + 全角转半角 + 剥离括号（半角/全角）内的商户/门店后缀。
+ * 例：「星巴克(上海店)」→「星巴克」、「餐饮美食（早餐）」→「餐饮美食」、「ＡＢＣ１２３」→「ABC123」。
+ * 背景：账单自带分类列常带门店/描述后缀（如「星巴克(上海店)」），
+ * 直接落库会因名称差异导致同一分类被拆成多条、引发分类膨胀；
+ * 归一化后用于分类解析的精确匹配前处理，提高命中率、避免重复创建。
+ */
+export function normalizeCategoryName(name?: string | null): string {
+  let s = String(name ?? '').trim();
+  if (!s) return '';
+  // 全角字符（数字/字母/常见标点）转半角；全角空格单独映射为半角空格
+  s = s.replace(/[\uFF01-\uFF5E]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0));
+  s = s.replace(/\u3000/g, ' ');
+  // 剥离括号内容（含半角/全角括号），如「星巴克(上海店)」「餐饮美食（早餐）」
+  s = s.replace(/[（(][^（()）]*[)）]/g, '');
+  return s.trim();
+}
+
+/**
+ * 内置分类名 → 默认 icon/color 映射（源自 factoryReset 种子数据），
+ * 供导入自动创建分类时补全样式字段——词典命中内置分类名时沿用其专属样式，否则 📦/#6B7280 兜底。
+ */
+const BUILTIN_CATEGORY_META = new Map<string, { icon: string; color: string }>(
+  DEFAULT_CATEGORIES.map(([name, , icon, color]) => [name, { icon, color }])
+);
+
+/**
+ * 分类解析「三级收敛」（纯函数，便于单测）：
+ * ① 归一化精确命中：按「归一化名称 + 类型」匹配库中已有分类，未命中再宽松比对「库名归一化后相等」；
+ * ② 内置词典兜底：账单自带分类列（如支付宝「餐饮美食」「商业服务」）命中内置词典 → 复用内置分类，
+ *    内置分类种子迁移必有，无需新建——这是修复分类膨胀的关键（此前带分类列的行直接跳过词典、被无条件新建）；
+ * ③ 均未命中：返回需新建的分类名与样式（是否新建由调用方按 autoCreate 决定）。
+ * @param name 账单行分类名（未归一化的原始值）
+ * @param type 交易类型（income/expense 等，决定分类的 type 口径）
+ * @param catMap 库中已有分类（key=`名称|类型`，value=id）；命中后可能写入记忆化 key，避免重复遍历
+ * @param classify 内置词典归类函数（可注入，便于测试）
+ * @returns `{ name, id }`：name 为最终分类名（新建时使用）；id 非 null 表示复用已有分类
+ */
+export function resolveImportCategory(
+  name: string,
+  type: ImportTxType,
+  catMap: Map<string, number>,
+  classify: (t: string) => { category: string; via: string } | null = classifyBuiltinCategory,
+): { name: string; id: number | null } {
+  const normName = normalizeCategoryName(name) || String(name).trim();
+  // ① 归一化精确命中：先按「归一化名称 + 类型」直查
+  const key = `${normName}|${type}`;
+  let id = catMap.get(key) ?? null;
+  if (id == null) {
+    // 直查未中：逐项比对「库中分类名归一化后相等」（覆盖用户曾用别名/带括号变体建过分类的场景）
+    for (const [ck, cid] of catMap) {
+      const sep = ck.indexOf('|');
+      if (ck.slice(sep + 1) === type && normalizeCategoryName(ck.slice(0, sep)) === normName) {
+        id = cid;
+        catMap.set(key, cid); // 记忆化：本行及其后同分类行不再重复遍历
+        break;
+      }
+    }
+  }
+  // ② 内置词典兜底：别名/未建分类的账单分类名命中内置词典 → 复用内置分类
+  if (id == null) {
+    const b = classify(normName);
+    if (b) {
+      const bKey = `${b.category}|${type}`;
+      id = catMap.get(bKey) ?? null;
+      if (id == null) {
+        // 同名分类仅类型不同（如收入「工资」被支出行误引）→ 复用同名校分类，不重复建
+        for (const [ck, cid] of catMap) {
+          if (ck.slice(0, ck.indexOf('|')) === b.category) { id = cid; catMap.set(bKey, cid); break; }
+        }
+      }
+      // 词典命中：无论复用已有分类还是需新建，统一返回内置分类名（新建时不带别名建出膨胀分类）
+      return { name: b.category, id };
+    }
+  }
+  // ③ 兜底：返回归一化名，由调用方按 autoCreate 决定是否新建
+  return { name: normName, id };
+}
+
+/**
  * 计算交易的"去重指纹"：优先订单号（唯一）；无订单号时退回 `日期|类型|金额|账户|备注` 的精确组合。
  * 用于识别重复导入——同一笔流水再次导入时指纹相同，可被拦截。
  */
@@ -166,6 +248,134 @@ export function rowFingerprint(r: { date: string; type: string; amount: number; 
   const orderNo = String(r.orderNo ?? '').trim();
   if (orderNo) return `order:${orderNo}`;
   return `fp:${r.date}|${r.type}|${r.amount}|${String(r.account).trim()}|${normalizeFingerprintNote(r.note)}`;
+}
+
+// ==================== 跨账单宽松配对去重（A/B 两类） ====================
+// 背景：用户导入「钱包账单 + 银行流水」时，同一笔资金会被两个账单各记一次：
+//  - A 类（双记）：同一笔银行卡消费，钱包账单记「付款方式=银行卡」、银行账单记「财付通/微信支付」扣款，
+//    同日同额同向同卡 → 应只保留一条；
+//  - B 类（两腿）：银行卡充值到零钱，钱包账单记收入、银行账单记支出，同日同额同卡一收一支
+//    → 应合并为一条转账（银行卡 → 资金池），避免充值被重复记成收支。
+// 与既有「订单号 / 指纹」去重并存：A/B 配对行通常无共同订单号、备注不同，指纹也不相同，
+// 故本函数先于订单号/指纹去重执行，互不干扰。
+
+/** 跨账单配对的强信号：银行流水的「对方/备注」多为 财付通/微信支付/支付宝（钱包清算机构名） */
+const CROSS_BILL_SIGNAL = /财付通|微信支付|支付宝/;
+
+/** 是否储蓄卡账户名（跨账单双记的载体是储蓄卡流水；信用卡/资金池账户不参与配对） */
+function isBankAccountName(name: string): boolean {
+  const s = String(name ?? '');
+  return /储蓄|农信|农商|村镇/.test(s) && !/信用/.test(s);
+}
+
+/** 提取「跨账单配对」的银行卡侧名：收支行取 account；转账行优先 account、其次 toAccount 的银行卡侧。 */
+function crossBillCardOf(r: ImportRow): string {
+  const a = String(r.account ?? '');
+  if (isBankAccountName(a)) return a;
+  const t = String(r.toAccount ?? '');
+  return isBankAccountName(t) ? t : '';
+}
+
+/** 跨账单配对「信息完整度」打分（A 类保留信息更全的一条）：订单号 > 商户单号/收款方 > 备注/分类 */
+function crossBillInfoScore(r: ImportRow): number {
+  let s = 0;
+  if (r.orderNo) s += 3;
+  if (r.merchantOrderNo) s += 2;
+  if (r.payee) s += 2;
+  if (r.note) s += 1;
+  if (r.category) s += 1;
+  return s;
+}
+
+/**
+ * 跨账单宽松配对去重（A/B 两类），落库前调用：
+ * - A 类（双记）：同日 + 同额 + 同卡 + 跨账单信号（钱包侧绑卡行 ↔ 银行侧财付通行）
+ *   → 同一笔付款被两个账单各记一次，保留信息全的一条，另一条跳过并写导入日志；
+ * - B 类（两腿）：同日 + 同额 + 一收一支 + 同卡 + 跨账单信号（充值/提现两腿）
+ *   → 合并为一条转账（银行卡 → 资金池），避免充值/提现被重复记成收支；
+ * - 配对不唯一（同日同额同卡候选多于 2 条）→ 全部标 _pending 待确认，绝不自动删。
+ * 仅对批内行生效；提现/充值派生的「服务费」子行（_rowKey）不参与配对。
+ */
+export function dedupeCrossBill(rows: ImportRow[]): { rows: ImportRow[]; removed: number; notes: { line: number; reason: string }[] } {
+  const out = rows.slice();
+  const merged: ImportRow[] = [];
+  const removedLines = new Set<number>();
+  const notes: { line: number; reason: string }[] = [];
+  // ① 按「日期|金额」分组，仅收 银行卡账户 的收支/转账行（跨账单双记载体是储蓄卡流水）
+  const groups = new Map<string, ImportRow[]>();
+  for (const r of out) {
+    if (r._rowKey) continue; // 派生的服务费子行不参与配对
+    if (!crossBillCardOf(r)) continue;
+    const key = `${r.date}|${r.amount}`;
+    const g = groups.get(key);
+    if (g) g.push(r); else groups.set(key, [r]);
+  }
+  // ② 组内构建配对候选：同卡 + 至少一侧含跨账单信号；同一行落入多个候选 → 配对不唯一，标待确认
+  const done = new Set<ImportRow>();
+  for (const [, group] of groups) {
+    if (group.length < 2) continue;
+    for (let i = 0; i < group.length; i++) {
+      const a = group[i];
+      if (done.has(a)) continue;
+      const partners: number[] = [];
+      for (let j = i + 1; j < group.length; j++) {
+        const b = group[j];
+        if (done.has(b)) continue;
+        if (!accountsMatch(crossBillCardOf(a), crossBillCardOf(b))) continue;
+        const sigA = CROSS_BILL_SIGNAL.test([a.note, a.payee, a.payMethod, a.category].filter(Boolean).join(' '));
+        const sigB = CROSS_BILL_SIGNAL.test([b.note, b.payee, b.payMethod, b.category].filter(Boolean).join(' '));
+        if (!sigA && !sigB) continue;
+        partners.push(j);
+      }
+      if (partners.length > 1) {
+        // 配对不唯一：绝不自动删，标待确认由用户核对
+        for (const j of [i, ...partners]) {
+          group[j]._pending = '跨账单配对不唯一，待确认';
+          done.add(group[j]);
+        }
+        continue;
+      }
+      if (partners.length === 0) continue;
+      const b = group[partners[0]];
+      done.add(a); done.add(b);
+      const dirPair = [a.type, b.type].sort().join(',');
+      if (dirPair === 'expense,income') {
+        // B 类：一收一支两腿 → 合并为一条转账（银行卡 → 资金池）
+        const expenseRow = a.type === 'expense' ? a : b;
+        const incomeRow = a.type === 'income' ? a : b;
+        removedLines.add(a.line); removedLines.add(b.line);
+        const target = detectPoolTarget([incomeRow.note, incomeRow.payee, expenseRow.note, expenseRow.category].filter(Boolean).join(' '));
+        merged.push({
+          date: incomeRow.date,
+          type: 'transfer',
+          amount: incomeRow.amount,
+          account: expenseRow.account,
+          toAccount: target || undefined,
+          category: expenseRow.category ?? incomeRow.category,
+          note: [incomeRow.note, expenseRow.note].filter(Boolean).join(' ') || undefined,
+          payTime: incomeRow.payTime ?? expenseRow.payTime,
+          payMethod: incomeRow.payMethod ?? expenseRow.payMethod,
+          payee: incomeRow.payee ?? expenseRow.payee,
+          orderNo: incomeRow.orderNo ?? expenseRow.orderNo,
+          merchantOrderNo: incomeRow.merchantOrderNo ?? expenseRow.merchantOrderNo,
+          line: expenseRow.line,
+          // 目标资金池识别不出时不臆测，标待确认
+          _pending: target ? undefined : '跨账单合并目标账户待确认',
+          basis: '跨账单合并（充值/提现两腿）→ 转账（银行卡 → 资金池）',
+        });
+        notes.push({ line: a.line, reason: '跨账单两腿（同日/同额/同卡收支）已合并为一条转账' });
+        notes.push({ line: b.line, reason: '跨账单两腿（同日/同额/同卡收支）已合并为一条转账' });
+      } else {
+        // A 类：同向双记 / 转账与收支双记 → 保留信息全的一条，另一条跳过并写日志
+        const keep = crossBillInfoScore(a) >= crossBillInfoScore(b) ? a : b;
+        const drop = keep === a ? b : a;
+        removedLines.add(drop.line);
+        notes.push({ line: drop.line, reason: `跨账单重复（同日/同额/同卡双记）已跳过，保留第${keep.line}行` });
+      }
+    }
+  }
+  const filtered = out.filter((r) => !removedLines.has(r.line));
+  return { rows: [...filtered, ...merged], removed: removedLines.size, notes };
 }
 
 // 导入参考数据：当前账本下的账户 / 全局限分类（供前端解析时提示与校验）
@@ -212,6 +422,14 @@ export async function bulkImportTransactions(rows: ImportRow[], opts: { autoCrea
     const batchOrders = new Set<string>();
     const batchFps = new Set<string>();
 
+    // —— 跨账单宽松配对去重（A/B 两类，先于订单号/指纹去重执行）——
+    // 同一批中「钱包账单 + 银行流水」的同一笔资金双记/两腿会被合并，
+    // 配对不唯一时标 _pending 待确认；配对剔除的行计入 duplicates 并写入导入日志。
+    const deduped = dedupeCrossBill(rows);
+    rows = deduped.rows;
+    duplicates += deduped.removed;
+    for (const n of deduped.notes) skipped.push(n);
+
     for (const r of rows) {
       try {
         // —— 校验 ——
@@ -231,20 +449,22 @@ export async function bulkImportTransactions(rows: ImportRow[], opts: { autoCrea
           if (toId === fromId) throw new Error('转账账户与转入账户相同');
         }
 
-        // —— 分类解析（可选）——
+        // —— 分类解析（三级收敛，见 resolveImportCategory：归一化精确 → 内置词典 → 自动创建）——
         let catId: number | null = null;
         if (r.category) {
-          const key = `${r.category}|${r.type}`;
-          catId = catMap.get(key) ?? null;
+          const resolved = resolveImportCategory(r.category, r.type, catMap);
+          catId = resolved.id;
+          // ③ 精确/词典均未命中且勾选自动创建 → 新建：补全 icon/color（内置分类沿用专属样式，否则 📦/#6B7280 兜底）、sort_order=99
           if (catId == null && opts.autoCreate) {
+            const meta = BUILTIN_CATEGORY_META.get(resolved.name) ?? { icon: '📦', color: '#6B7280' };
             const res = await execute(
-              `INSERT INTO categories (name, type, sort_order) VALUES ($1, $2, 99)`,
-              [r.category.trim(), r.type]
+              `INSERT INTO categories (name, type, icon, color, sort_order) VALUES ($1, $2, $3, $4, 99)`,
+              [resolved.name, r.type, meta.icon, meta.color]
             );
             catId = res.lastInsertId as number;
-            if (catId == null) throw new Error(`分类「${r.category}」创建失败`);
-            catMap.set(key, catId);
-            createdCategoriesSet.add(r.category.trim());
+            if (catId == null) throw new Error(`分类「${resolved.name}」创建失败`);
+            catMap.set(`${resolved.name}|${r.type}`, catId);
+            createdCategoriesSet.add(resolved.name);
           }
           if (catId == null) throw new Error(`分类「${r.category}」不存在（需先创建或勾选自动创建）`);
         }
@@ -403,6 +623,40 @@ export function normalizeAccountName(raw: unknown): string {
     if (keys.some((k) => low.includes(k))) return canon;
   }
   return origBase;
+}
+
+/**
+ * 付款方式 → 账户归属（资金池词典）：
+ * 钱包账单的「付款方式/收付款方式」列常给出资金池（零钱/余额/零钱通/余额宝）或银行卡/信用账户。
+ * 本函数把资金池类付款方式归一到**精确资金池账户名**，其余（银行卡尾号/未知）退回归一化名。
+ * 例：`零钱`→`微信零钱`、`零钱通`→`微信零钱通`、`余额`→`支付宝余额`、`余额宝`→`余额宝`、
+ *     `花呗`→`花呗`、`工商银行储蓄卡(1055)`→`工商银行储蓄卡(1055)`（银行卡保留尾号）。
+ * 注意：须在 normalizeAccountName 之前调用——normalizeAccountName 会把资金池归并进「微信/支付宝」
+ * 大账户（账户去重口径），若先归并再解析会丢失资金池粒度；落库时 resolveAccount 仍按「精确账户
+ * 优先、否则归一化归并」兜底，故用户手动建过精确资金池账户（如「微信零钱」）即命中，未建则并入大账户。
+ */
+export function resolvePayMethodAccount(raw: unknown): string {
+  const s = String(raw ?? '').trim();
+  if (!s) return '';
+  // 命中顺序关键：零钱通/余额宝须先于 零钱/余额 判断（零钱通含「零钱」、余额宝含「余额」子串）
+  if (/零钱通/.test(s)) return '微信零钱通';
+  if (/零钱/.test(s)) return '微信零钱';
+  if (/余额宝/.test(s)) return '余额宝';
+  if (/花呗/.test(s)) return '花呗';
+  if (/白条/.test(s)) return '白条';
+  // 「余额」「账户余额」「支付宝余额」及其括注变体 → 支付宝余额资金池（同一资金源不拆池）
+  if (/余额|账户/.test(s)) return '支付宝余额';
+  return normalizeAccountName(s);
+}
+
+/** 从账单文本识别「资金池转入目标」：零钱通 → 余额宝 → 零钱 → 余额/账户；识别不到返回空串。 */
+export function detectPoolTarget(text: unknown): string {
+  const s = String(text ?? '');
+  if (/零钱通/.test(s)) return '微信零钱通';
+  if (/余额宝/.test(s)) return '余额宝';
+  if (/零钱/.test(s)) return '微信零钱';
+  if (/余额|账户/.test(s)) return '支付宝余额';
+  return '';
 }
 
 /** 按账户名关键词推断帐户类型（供自动创建使用）。
@@ -588,7 +842,9 @@ export function parseBillAOA(aoa: unknown[][], rules: ImportRule[] = []): { rows
       line: lineNo,
       amount,
       date,
-      account: normalizeAccountName(channel) || '未识别账户',
+      // 账户归属：付款方式先经「资金池词典」解析（零钱→微信零钱、余额→支付宝余额等精确资金池账户），
+      // 银行卡尾号/未知付款方式退回归一化名；空值兜底「未识别账户」
+      account: resolvePayMethodAccount(channel) || '未识别账户',
       category: v(cols.type) || undefined,
       note: [v(cols.goods), v(cols.note)].filter(Boolean).join(' ') || undefined,
       payTime: time || undefined,
@@ -659,7 +915,8 @@ export function parseBillAOA(aoa: unknown[][], rules: ImportRule[] = []): { rows
     // 但账单不能 100% 保证真实到账账户，故一律标「待确认」，由用户核对后再导入。
     if ((/退款/.test(goodsText) || /退款/.test(typeText)) && (/退款/.test(statusText) || neutral)) {
       const rawChannel = v(cols.channel);
-      const dest = normalizeAccountName(rawChannel);
+      // 退款去向账户：与付款方式口径一致走资金池词典（回「余额」→「支付宝余额」、回「花呗」→「花呗」）
+      const dest = resolvePayMethodAccount(rawChannel);
       const isCredit = isCreditAccountName(dest) || isCreditAccountName(rawChannel);
       rows.push({
         ...common,
@@ -673,29 +930,44 @@ export function parseBillAOA(aoa: unknown[][], rules: ImportRule[] = []): { rows
       continue;
     }
 
-    // —— ③ 提现（零钱 / 余额 → 银行卡）——
-    // 本金是账户间平移（转账，不计收支）；服务费是真实成本，单独记一笔支出，避免手续费被整体忽略。
-    if (/提现/.test(typeText + goodsText)) {
+    // —— ③ 提现（零钱 / 零钱通 / 余额 / 余额宝 → 银行卡）——
+    // 本金是账户间平移（转账，不计收支）；服务费是真实成本，单独记一笔支出。
+    // 关键口径：**手续费从提现金额内扣**——账单只记「提现 -1000」一条，拆为
+    // 「转账实到（原金额 − 服务费）+ 手续费支出」，保证 实到 + 手续费 = 原提现金额，
+    // 资金池净变化恰为 −原金额，绝不在零钱侧额外多扣一笔服务费。
+    const withdrawText = typeText + goodsText;
+    if (/提现/.test(withdrawText) || /(零钱通|余额宝).{0,8}(转出|到账)/.test(withdrawText)) {
       // 两个平台的列语义不同：
-      // 微信「零钱提现」的支付方式列给的是**到账银行卡**（来源固定是微信零钱）；
-      // 支付宝「提现」的收/付款方式列给的是**来源**（余额），到账银行只能从交易对方列看到机构名。
+      // 微信「零钱/零钱通提现」的支付方式列给的是**到账银行卡**（来源固定是零钱/零钱通）；
+      // 支付宝「提现/余额宝转出」的收/付款方式列给的是**来源**（余额/余额宝），到账银行只能从交易对方列看到机构名。
       const channelText = v(cols.channel);
-      const isWechatWithdraw = /零钱/.test(typeText + goodsText);
-      const rawFrom = isWechatWithdraw ? '微信' : normalizeAccountName(channelText);
-      const fromAccount = rawFrom === '余额' ? '账户余额' : rawFrom || '未识别账户';
+      const isWechatWithdraw = /零钱/.test(withdrawText);
+      // 来源资金池：零钱通/余额宝须先于 零钱/余额 判断（子串包含关系）
+      const fromPool = /零钱通/.test(withdrawText) ? '微信零钱通'
+        : /余额宝/.test(withdrawText) ? '余额宝'
+        : /零钱/.test(withdrawText) ? '微信零钱'
+        : /余额/.test(withdrawText) ? '支付宝余额'
+        : '';
+      const fromAccount = isWechatWithdraw
+        ? (fromPool || '未识别账户')
+        : (resolvePayMethodAccount(channelText) || '未识别账户');
       const toAccount = isWechatWithdraw ? normalizeAccountName(channelText) : '';
+      // 服务费可能落在备注 / 商品说明 / 金额括号里，故在整行文本中检索
+      const fee = extractServiceFee(row.join(' '));
+      // 手续费内扣：实到 = 原提现金额 − 服务费；四舍五入到分，规避浮点尾差（如 114.43−0.11=114.32000000000001）
+      const principal = Math.round((common.amount - fee) * 100) / 100;
       rows.push({
         ...common,
         type: 'transfer',
+        // 手续费内扣：实到 = 原提现金额 − 服务费（账单金额是「提现毛额」）
+        amount: principal,
         account: fromAccount,
         toAccount,
         // 到账卡不可确定时才标待确认（微信账单已明示到账卡，无需打扰用户）
         _pending: toAccount ? undefined : '提现到账账户待确认',
         // 依据：提现本金是账户间平移（转账），不计收支；服务费单独记支出
-        basis: '账单识别「提现」→ 转账（账户 → 银行卡）',
+        basis: '账单识别「提现」→ 转账（账户 → 银行卡），手续费内扣',
       });
-      // 服务费可能落在备注 / 商品说明 / 金额括号里，故在整行文本中检索
-      const fee = extractServiceFee(row.join(' '));
       if (fee > 0) {
         rows.push({
           ...common,
@@ -705,6 +977,42 @@ export function parseBillAOA(aoa: unknown[][], rules: ImportRule[] = []): { rows
           category: '手续费',
           note: [common.note, '提现服务费'].filter(Boolean).join(' '),
           basis: '账单识别「提现」→ 服务费单独记支出（手续费）',
+        });
+      }
+      continue;
+    }
+
+    // —— ④ 充值 / 转入（银行卡 → 资金池，或资金池间平移）——
+    // 话费充值 / 游戏充值等是真实消费支出，不在此列；
+    // 仅当「充值/转入」目标确为资金池（零钱/零钱通/余额/余额宝/账户）且方向非支出时记为转账。
+    // 充值入账额 = 原金额（服务费如存在从来源侧另行支出，不内扣——与提现相反，充值到账是全额）。
+    const poolText = typeText + goodsText + v(cols.note);
+    if ((/充值/.test(poolText) || /转入/.test(poolText))
+      && !/支出|消费|缴费/.test(io)
+      && /零钱|余额|账户|理财/.test(poolText)) {
+      const channelText = v(cols.channel);
+      const fromAccount = resolvePayMethodAccount(channelText) || '未识别账户';
+      const target = detectPoolTarget(poolText);
+      rows.push({
+        ...common,
+        type: 'transfer',
+        account: fromAccount,
+        toAccount: target || undefined,
+        // 目标资金池识别不出时不臆测，标待确认
+        _pending: target ? undefined : '充值/转入目标资金池待确认',
+        // 依据：充值是银行卡 → 资金池 的资金平移（转账），不计收支
+        basis: '账单识别「充值 / 转入」→ 转账（银行卡 → 资金池）',
+      });
+      const fee = extractServiceFee(row.join(' '));
+      if (fee > 0) {
+        rows.push({
+          ...common,
+          _rowKey: `${lineNo}:fee`,
+          type: 'expense',
+          amount: fee,
+          category: '手续费',
+          note: [common.note, '充值服务费'].filter(Boolean).join(' '),
+          basis: '账单识别「充值」→ 服务费单独记支出（手续费）',
         });
       }
       continue;

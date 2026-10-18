@@ -309,12 +309,17 @@ export async function createLoan(p: {
 
 // 利息收入/支出对应的默认分类（按类型名查找；未找到则留空分类，只计入收支合计）
 async function interestCategoryId(direction: 'lend' | 'borrow'): Promise<number | undefined> {
-  const name = direction === 'lend' ? '投资收益' : '其他支出';
-  const rows = await select<{ id: number }>(
-    `SELECT id FROM categories WHERE type = $1 AND name = $2 AND ledger_id = $3 LIMIT 1`,
-    [direction === 'lend' ? 'income' : 'expense', name, currentLedgerId()]
-  );
-  const id = rows[0]?.id;
+  // 借出利息归「投资收益」（收入分类，内置保留）；借入利息无专属分类，
+  // 直接走下方兜底（取该类型第一个分类），避免引用已下线的「其他支出」
+  const name = direction === 'lend' ? '投资收益' : undefined;
+  let id: number | undefined;
+  if (name) {
+    const rows = await select<{ id: number }>(
+      `SELECT id FROM categories WHERE type = $1 AND name = $2 AND ledger_id = $3 LIMIT 1`,
+      [direction === 'lend' ? 'income' : 'expense', name, currentLedgerId()]
+    );
+    id = rows[0]?.id;
+  }
   if (id != null) return id;
   // 兜底：取该类别的第一个分类（避免利息完全无法归类）
   const fallback = await select<{ id: number }>(

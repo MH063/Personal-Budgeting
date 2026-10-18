@@ -16,8 +16,9 @@
  */
 import { execute, runInTransaction, select } from '@/api/db';
 
-/** 与迁移 001 / schema.ts 完全一致的默认分类（恢复出厂后重建，用户无需手动重建） */
-const DEFAULT_CATEGORIES: ReadonlyArray<[string, string, string, string, number]> = [
+/** 与迁移 001 / schema.ts 完全一致的默认分类（恢复出厂后重建，用户无需手动重建）
+ *  导出供导入解析（import.ts）在自动创建分类时复用内置分类的 icon/color。 */
+export const DEFAULT_CATEGORIES: ReadonlyArray<[string, string, string, string, number]> = [
   ['餐饮', 'expense', '🍜', '#EF4444', 1],
   ['交通', 'expense', '🚌', '#3B82F6', 2],
   ['购物', 'expense', '🛍️', '#8B5CF6', 3],
@@ -25,9 +26,17 @@ const DEFAULT_CATEGORIES: ReadonlyArray<[string, string, string, string, number]
   ['娱乐', 'expense', '🎮', '#EC4899', 5],
   ['医疗', 'expense', '💊', '#14B8A6', 6],
   ['教育', 'expense', '📚', '#6366F1', 7],
-  ['其他支出', 'expense', '📦', '#6B7280', 8],
+  ['人情', 'expense', '🎁', '#F97316', 8],
+  ['通讯', 'expense', '📱', '#06B6D4', 9],
+  ['旅行', 'expense', '✈️', '#0EA5E9', 10],
+  ['美妆', 'expense', '💄', '#F43F5E', 11],
+  ['运动', 'expense', '🏃', '#22C55E', 12],
+  ['数码', 'expense', '💼', '#64748B', 13],
+  ['宠物', 'expense', '🐱', '#84CC16', 14],
+  ['宝宝', 'expense', '👶', '#F472B6', 15],
+  ['网购', 'expense', '🛒', '#D946EF', 16],
   ['工资', 'income', '💰', '#10B981', 1],
-  ['奖金', 'income', '🎁', '#F59E0B', 2],
+  ['奖金', 'income', '🏆', '#F59E0B', 2],
   ['兼职', 'income', '💼', '#3B82F6', 3],
   ['投资收益', 'income', '📈', '#8B5CF6', 4],
   ['红包', 'income', '🧧', '#EF4444', 5],

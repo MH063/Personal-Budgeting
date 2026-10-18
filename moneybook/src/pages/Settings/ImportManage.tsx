@@ -475,6 +475,16 @@ export default function ImportManage() {
       if (res.createdCategories.length) msg += `，自动创建分类 ${res.createdCategories.length} 个`;
       if (res.skipped.length) msg += `，跳过 ${res.skipped.length} 条${res.duplicates ? `（其中 ${res.duplicates} 条疑似重复）` : ''}`;
       toast.success(msg);
+      // 防爆闸：一次导入新建分类过多 → 提示存在分类膨胀风险，引导去配置归类/映射收敛
+      // （背景：账单自带分类列（如「餐饮美食」「商业服务」）若未命中词典会不断新建同名变体，
+      //   累计成几十上百个近似分类；>10 即视为膨胀信号，给出门店示例便于用户对症配置规则）
+      if (res.createdCategories.length > 10) {
+        const samples = res.createdCategories.slice(0, 6).join('、');
+        toast.warning(
+          `本次自动创建了 ${res.createdCategories.length} 个分类，可能存在分类膨胀。\n建议在「导入规则 / 归类规则」中为常用商户配置映射，减少重复分类。示例：${samples}${res.createdCategories.length > 6 ? '…' : ''}`,
+          { duration: 10000 }
+        );
+      }
       if (res.skipped.length) {
         const first = res.skipped.slice(0, 6).map((s) => `第${s.line}行：${s.reason}`).join('\n');
         toast.warning(`部分行被跳过：\n${first}${res.skipped.length > 6 ? `\n…共 ${res.skipped.length} 条` : ''}`, { duration: 6000 });

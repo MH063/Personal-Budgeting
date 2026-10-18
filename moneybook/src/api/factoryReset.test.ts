@@ -53,13 +53,13 @@ describe('resetAllData：恢复出厂设置', () => {
     expect(execMock.mock.calls.some(([sql]) => String(sql) === 'DELETE FROM sqlite_sequence')).toBe(true);
   });
 
-  it('重建 14 条默认分类（与迁移 001 一致：8 支出 + 6 收入）', async () => {
+  it('重建 22 条默认分类（与迁移 001 一致：16 支出 + 6 收入）', async () => {
     await resetAllData();
     const inserts = execMock.mock.calls.filter(([sql]) => String(sql).includes('INSERT INTO categories'));
-    expect(inserts).toHaveLength(14);
+    expect(inserts).toHaveLength(22);
     const expense = inserts.filter(([, p]) => p?.[1] === 'expense');
     const income = inserts.filter(([, p]) => p?.[1] === 'income');
-    expect(expense).toHaveLength(8);
+    expect(expense).toHaveLength(16);
     expect(income).toHaveLength(6);
     // 首条默认分类为「餐饮/支出」
     expect(inserts[0][1]?.[0]).toBe('餐饮');

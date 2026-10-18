@@ -368,6 +368,39 @@ export async function chat(messages: ChatMessageInput[], opts: { signal?: AbortS
   throw lastErr;
 }
 
+/**
+ * 流式「建流」单次请求：返回已确认可读的 Response。
+ * 错误分类与 chatOnce 对齐：429/5xx 抛 RetryableChatError（可重试）；其余 4xx（参数/认证）
+ * 抛 FatalChatError（不可重试）；网络/超时/取消错误原样抛出，由 chatStream 重试循环裁决。
+ * 内含 stream_options 兼容性兜底（服务商不认该字段时去掉重发一次）。
+ */
+async function streamOnce(
+  baseURL: string,
+  apiKey: string,
+  body: Record<string, unknown>,
+  timeoutGuard: ReturnType<typeof createTimeoutGuard>
+): Promise<Response> {
+  const send = () => httpFetch(`${baseURL}/chat/completions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+    body: JSON.stringify(body),
+    signal: timeoutGuard.signal,
+  });
+  let res = await send();
+  if (res.status === 400 && 'stream_options' in body) {
+    delete body.stream_options;
+    // 关键位置日志：便于区分「服务商不兼容 stream_options」与其它 400 原因
+    console.warn('[llm] 服务商未接受 stream_options，已去掉该字段重试流式请求');
+    res = await send();
+  }
+  if (!res.ok || !res.body) {
+    const msg = `AI 服务返回错误：${describeAiHttpError(res.status, baseURL)}（HTTP ${res.status}）`;
+    if (res.status === 429 || res.status >= 500) throw new RetryableChatError(msg);
+    throw new FatalChatError(msg);
+  }
+  return res;
+}
+
 /** 流式对话：逐片回调内容（SSE 风格，兼容 OpenAI 系接口）。隐私约束与 chat 一致。 */
 export async function chatStream(
   messages: ChatMessageInput[],
@@ -393,39 +426,55 @@ export async function chatStream(
   // 若服务商因该字段返回 400，则去掉该字段重发一次；此时无 usage 返回，recordAiUsage 已做缺失容错。
   body.stream_options = { include_usage: true };
 
-  let res: Response;
-  // 超时守卫：流式采用「空闲超时」，每收到一片数据即刷新计时（见下方 timeoutGuard.touch()）
-  const timeoutGuard = createTimeoutGuard(STREAM_IDLE_TIMEOUT_MS, opts.signal);
-  try {
-    res = await httpFetch(`${baseURL}/chat/completions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${c.apiKey}` },
-      body: JSON.stringify(body),
-      signal: timeoutGuard.signal,
-    });
-    if (res.status === 400 && 'stream_options' in body) {
-      delete body.stream_options;
-      // 关键位置日志：便于区分「服务商不兼容 stream_options」与其它 400 原因
-      console.warn('[llm] 服务商未接受 stream_options，已去掉该字段重试流式请求');
-      res = await httpFetch(`${baseURL}/chat/completions`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${c.apiKey}` },
-        body: JSON.stringify(body),
-        signal: timeoutGuard.signal,
-      });
+  let res: Response | undefined;
+  let timeoutGuard: ReturnType<typeof createTimeoutGuard> | undefined;
+  let lastErr: Error = new Error('AI 请求失败');
+  // 建流阶段与 chat 一致做有限重试（429/5xx/网络/超时，最多 CHAT_MAX_RETRIES 次）。
+  // 注意取舍：流式开始后的中断不重试——已吐出的内容无法撤销，重发会导致重复输出。
+  for (let attempt = 0; attempt <= CHAT_MAX_RETRIES; attempt++) {
+    if (opts.signal?.aborted) throw new Error('已取消');
+    // 首次请求不等待；重试前按指数退避等待（退避期间被取消则直接终止）
+    if (attempt > 0) {
+      const waitMs = chatRetryDelayMs(attempt);
+      console.warn(`[llm] chatStream 第 ${attempt} 次重试，退避 ${waitMs}ms 后发送`);
+      await backoffSleep(waitMs, opts.signal);
     }
-  } catch (e) {
-    timeoutGuard.cleanup();
-    if (timeoutGuard.timedOut()) throw new Error(timeoutMessage('响应', STREAM_IDLE_TIMEOUT_MS, baseURL));
-    if ((e as Error).name === 'AbortError') throw e;
-    throw new Error(`网络错误：无法连接到 ${baseURL}（${(e as Error).message}）`);
+    // 超时守卫：流式采用「空闲超时」，每收到一片数据即刷新计时（见下方 timeoutGuard.touch()）。
+    // 每次重试都新建守卫，保证单次请求独立计时，重试之间不串扰超时语义。
+    const guard = createTimeoutGuard(STREAM_IDLE_TIMEOUT_MS, opts.signal);
+    timeoutGuard = guard;
+    try {
+      res = await streamOnce(baseURL, c.apiKey, body, guard);
+      break; // 建流成功，跳出重试循环
+    } catch (e) {
+      guard.cleanup();
+      lastErr = e as Error;
+      if (e instanceof FatalChatError) throw e; // 参数/认证等不可重试错误直接抛
+      if (e instanceof RetryableChatError) {
+        if (attempt >= CHAT_MAX_RETRIES) throw e;
+        console.warn(`[llm] chatStream 请求失败（第 ${attempt + 1} 次），将重试：`, lastErr.message);
+        continue;
+      }
+      // 网络/超时：可重试；用户取消除外
+      if (timeoutGuard.timedOut()) {
+        const msg = timeoutMessage('响应', STREAM_IDLE_TIMEOUT_MS, baseURL);
+        if (attempt >= CHAT_MAX_RETRIES) throw new Error(msg);
+        console.warn(`[llm] chatStream 请求失败（第 ${attempt + 1} 次），将重试：`, msg);
+        continue;
+      }
+      if (isAbortError(e) || opts.signal?.aborted) throw e;
+      const msg = `网络错误：无法连接到 ${baseURL}（${lastErr.message}）`;
+      if (attempt >= CHAT_MAX_RETRIES) throw new Error(msg);
+      console.warn(`[llm] chatStream 请求失败（第 ${attempt + 1} 次），将重试：`, msg);
+    }
   }
-  if (!res.ok || !res.body) {
-    timeoutGuard.cleanup();
-    throw new Error(`AI 服务返回错误：${describeAiHttpError(res.status, baseURL)}（HTTP ${res.status}）`);
-  }
+  // 理论不可达：所有失败路径均已 throw；此处兜底避免「res 未赋值」的类型缝隙
+  if (!res || !timeoutGuard) throw lastErr;
+  // streamOnce 已校验 body 非空，此处再窄化一次以满足 TS 控制流（跨函数调用无法自动推断）
+  const stream = res.body;
+  if (!stream) throw new Error(`AI 服务返回错误：无响应内容（HTTP ${res.status}）`);
 
-  const reader = res.body.getReader();
+  const reader = stream.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
   let full = '';

@@ -8,6 +8,8 @@ import {
   parseCsvText, parseBillAOA, normalizeAccountName, inferAccountType, enforceAccountType, accountsMatch,
   rowFingerprint, buildColumnMap, parseTxType, parseAoaWithMap,
   parseBillDate, detectCreditAccount, extractServiceFee, rowKeyOf,
+  normalizeCategoryName, resolveImportCategory,
+  resolvePayMethodAccount, detectPoolTarget, dedupeCrossBill,
 } from './import';
 
 describe('accountsMatch：账户并入已有同义账户（安全档：归一化精确）', () => {
@@ -89,6 +91,69 @@ describe('rowFingerprint：导入去重指纹', () => {
   });
 });
 
+describe('normalizeCategoryName：分类名归一化', () => {
+  it('剥离括号（半角/全角）商户后缀', () => {
+    expect(normalizeCategoryName('星巴克(上海店)')).toBe('星巴克');
+    expect(normalizeCategoryName('餐饮美食（早餐）')).toBe('餐饮美食');
+  });
+  it('trim 与全角转半角', () => {
+    expect(normalizeCategoryName(' 餐饮 ')).toBe('餐饮');
+    expect(normalizeCategoryName('ＡＢＣ１２３')).toBe('ABC123');
+    expect(normalizeCategoryName('购物　(某商场)')).toBe('购物'); // 全角空格 + 括号
+  });
+  it('空/null/纯括号返回空或兜底', () => {
+    expect(normalizeCategoryName('')).toBe('');
+    expect(normalizeCategoryName(null)).toBe('');
+    expect(normalizeCategoryName('  ')).toBe('');
+  });
+});
+
+describe('resolveImportCategory：分类解析三级收敛', () => {
+  it('① 归一化精确命中：直接复用已有分类 id', () => {
+    const catMap = new Map([['餐饮|expense', 1]]);
+    expect(resolveImportCategory('餐饮', 'expense', catMap)).toEqual({ name: '餐饮', id: 1 });
+  });
+
+  it('① 归一化宽松比对：库中分类名归一化后相等即命中（不新建）', () => {
+    // 用户曾用「餐饮美食」建过分类；账单行带括号变体 → 归一化后相等，复用而非新建
+    const catMap = new Map([['餐饮美食|expense', 7]]);
+    expect(resolveImportCategory('餐饮美食（早餐）', 'expense', catMap)).toEqual({ name: '餐饮美食', id: 7 });
+  });
+
+  it('② 内置词典兜底：账单自带分类列别名命中内置分类 → 复用内置分类 id，绝不新建', () => {
+    // 支付宝「交易分类」为「餐饮美食」→ 词典归「餐饮」，库中已有内置餐饮 → 直接复用
+    const catMap = new Map([['餐饮|expense', 1], ['购物|expense', 3]]);
+    expect(resolveImportCategory('餐饮美食', 'expense', catMap)).toEqual({ name: '餐饮', id: 1 });
+  });
+
+  it('② 词典命中但库中无该内置分类 → 返回内置分类名待新建（不带别名建出膨胀分类）', () => {
+    const catMap = new Map<string, number>(); // 用户把内置餐饮删了
+    expect(resolveImportCategory('餐饮美食', 'expense', catMap)).toEqual({ name: '餐饮', id: null });
+  });
+
+  it('② 词典命中且同名分类仅类型不同 → 复用同名校分类，不重复建', () => {
+    // 收入行分类「工资」命中词典（工资为收入分类）；库中仅有 income 类型 → 复用，不新建 expense 类型
+    const catMap = new Map([['工资|income', 17]]);
+    expect(resolveImportCategory('工资', 'expense', catMap)).toEqual({ name: '工资', id: 17 });
+  });
+
+  it('③ 均未命中 → 返回归一化名与 null（由调用方按 autoCreate 决定新建）', () => {
+    const catMap = new Map([['餐饮|expense', 1]]);
+    const res = resolveImportCategory('完全陌生的分类', 'expense', catMap);
+    expect(res).toEqual({ name: '完全陌生的分类', id: null });
+    expect(normalizeCategoryName('完全陌生的分类(某店)')).toBe('完全陌生的分类');
+    expect(resolveImportCategory('完全陌生的分类(某店)', 'expense', catMap)).toEqual({ name: '完全陌生的分类', id: null });
+  });
+
+  it('命中后记忆化：同一分类多行不重复遍历', () => {
+    const catMap = new Map([['餐饮|expense', 1]]);
+    resolveImportCategory('餐饮', 'expense', catMap);
+    expect(catMap.get('餐饮|expense')).toBe(1); // 原始 key 已存在，不新增记忆化 key
+    resolveImportCategory('餐饮美食', 'expense', catMap); // 词典命中 → 记忆化 bKey
+    expect(catMap.get('餐饮|expense')).toBe(1);
+  });
+});
+
 describe('parseCsvText：标准 CSV 解析', () => {
   it('按逗号拆行，处理引号内逗号与转义引号', () => {
     const raw = 'a,b,c\n"x,y",z,"h""i"\n';
@@ -141,7 +206,7 @@ describe('parseBillAOA：支付宝真实账单', () => {
   it('被跳过的行保留原始字段（_skippedReason+账户+日期），供用户手动恢复', () => {
     const neu = res.skippedRows.find((r) => r.amount === 500);
     expect(neu).toBeDefined();
-    expect(neu!.account).toBe('账户余额'); // 账户字段保留，可编辑/恢复
+    expect(neu!.account).toBe('支付宝余额'); // 「账户余额」付款方式经资金池词典归并为「支付宝余额」，账户字段保留，可编辑/恢复
     expect(neu!.date).toBe('2026-09-10');
     expect(res.skippedRows.length).toBe(1);
   });
@@ -220,16 +285,18 @@ describe('parseBillAOA：资金流向建模（还款 / 退款 / 提现 / 服务�
     expect(res.rows[1]).toMatchObject({ type: 'income', account: '中国银行储蓄卡(9509)', amount: 9.9, _pending: '退款去向待确认' });
   });
 
-  it('微信零钱提现 → 本金 transfer(微信→到账卡) + 服务费独立 expense；Excel 序列号日期可解析', () => {
+  it('微信零钱提现 → 本金 transfer(微信零钱→到账卡，手续费内扣) + 服务费独立 expense；Excel 序列号日期可解析', () => {
     const res = parseBillAOA([
       wxHeader,
       ['46084.38396990741', '零钱提现', '湖北农信(2440)', '/', '/', '114.43', '湖北农信储蓄卡(2440)', '提现已到账', '2072', '/', '备注:服务费¥0.11'],
     ]);
     expect(res.rows).toHaveLength(2); // 本金 + 服务费
     expect(res.rows[0]).toMatchObject({
-      type: 'transfer', account: '微信', toAccount: '湖北农信储蓄卡(2440)', amount: 114.43,
+      type: 'transfer', account: '微信零钱', toAccount: '湖北农信储蓄卡(2440)', amount: 114.32,
       date: '2026-03-03', // 46084.38 是 Excel 日期序列号
     });
+    // 手续费内扣：实到 = 原提现金额 − 服务费（114.43 − 0.11 = 114.32），资金池净变化 = −114.43
+    expect(res.rows[0].amount + res.rows[1].amount).toBeCloseTo(114.43);
     expect(res.rows[0]._pending).toBeUndefined(); // 账单已明示到账卡 → 不打扰用户
     expect(res.rows[1]).toMatchObject({ type: 'expense', amount: 0.11, category: '手续费' });
     expect(res.rows[1]._rowKey).toBe(`${res.rows[1].line}:fee`);
@@ -243,7 +310,7 @@ describe('parseBillAOA：资金流向建模（还款 / 退款 / 提现 / 服务�
     ]);
     expect(res.rows).toHaveLength(1);
     expect(res.rows[0]).toMatchObject({
-      type: 'transfer', account: '账户余额', toAccount: '', amount: 755.91, _pending: '提现到账账户待确认',
+      type: 'transfer', account: '支付宝余额', toAccount: '', amount: 755.91, _pending: '提现到账账户待确认',
     });
   });
 
@@ -318,6 +385,83 @@ describe('parseBillAOA：资金流向建模（还款 / 退款 / 提现 / 服务�
     expect(extractServiceFee('备注:服务费¥0.11')).toBe(0.11);
     expect(extractServiceFee('服务费 0.32 元')).toBe(0.32);
     expect(extractServiceFee('无手续费')).toBe(0);
+  });
+
+  it('④ 充值/转入 → 转账（银行卡 → 资金池），目标资金池从账单文本识别', () => {
+    // 支付宝「账户充值」：付款方式=银行卡，目标「余额」→ 转账（银行卡 → 支付宝余额）
+    const aliRecharge = parseBillAOA([
+      aliHeader,
+      ['2026-09-18 09:00', '账户充值', '支付宝', '/', '余额充值', '不计收支', '200.00', '工商银行储蓄卡(1055)', '交易成功', 'C1', '', ''],
+    ]);
+    expect(aliRecharge.rows[0]).toMatchObject({
+      type: 'transfer', account: '工商银行储蓄卡(1055)', toAccount: '支付宝余额', amount: 200, _pending: undefined,
+    });
+    expect(aliRecharge.rows[0].basis).toContain('转账');
+    // 微信「零钱充值」：方向为收入，付款方式=来源卡 → 转账（银行卡 → 微信零钱）
+    const wxRecharge = parseBillAOA([
+      wxHeader,
+      ['2026-09-19 10:00', '零钱充值', '微信支付', '零钱充值', '收入', '100.00', '工商银行储蓄卡(1055)', '充值成功', 'C2', '', ''],
+    ]);
+    expect(wxRecharge.rows[0]).toMatchObject({
+      type: 'transfer', account: '工商银行储蓄卡(1055)', toAccount: '微信零钱', amount: 100,
+    });
+    // 资金池间平移：「零钱通转入」从零钱 → 转账（微信零钱 → 微信零钱通）
+    const poolIn = parseBillAOA([
+      wxHeader,
+      ['2026-09-20 11:00', '理财通', '零钱通', '转入零钱通', '中性交易', '50.00', '零钱', '交易成功', 'C3', '', ''],
+    ]);
+    expect(poolIn.rows[0]).toMatchObject({
+      type: 'transfer', account: '微信零钱', toAccount: '微信零钱通', amount: 50,
+    });
+    // 话费充值 → 真实消费支出，不误判为转账
+    const phone = parseBillAOA([
+      aliHeader,
+      ['2026-09-25 06:33', '充值缴费', '中国电信', 'zhi', '话费自动充值', '支出', '59.69', '工商银行储蓄卡(1055)', '交易成功', 'C4', '', ''],
+    ]);
+    expect(phone.rows[0]).toMatchObject({ type: 'expense', account: '工商银行储蓄卡(1055)', amount: 59.69 });
+  });
+
+  it('③ 提现覆盖 零钱通/余额宝：来源资金池识别，手续费内扣拆行', () => {
+    // 微信零钱通提现：付款方式列=到账银行卡 → 转账（微信零钱通 → 卡）
+    const wxPool = parseBillAOA([
+      wxHeader,
+      ['2026-09-21 12:00', '零钱通转出', '湖北省农信社', '零钱通转出到银行卡', '不计收支', '500.00', '湖北农信储蓄卡(2440)', '交易成功', 'W2', '', '服务费0.05元'],
+    ]);
+    expect(wxPool.rows[0]).toMatchObject({
+      type: 'transfer', account: '微信零钱通', toAccount: '湖北农信储蓄卡(2440)', amount: 499.95,
+    });
+    expect(wxPool.rows[1]).toMatchObject({ type: 'expense', amount: 0.05, category: '手续费' });
+    // 支付宝余额宝转出：付款方式列=来源（余额宝）→ 转账（余额宝 → 到账卡待确认）
+    const aliYeb = parseBillAOA([
+      aliHeader,
+      ['2026-09-22 13:00', '余额宝', '湖北省农信社', '/', '余额宝转出到银行卡', '不计收支', '300.00', '余额宝', '交易成功', 'W3', '', ''],
+    ]);
+    expect(aliYeb.rows[0]).toMatchObject({
+      type: 'transfer', account: '余额宝', toAccount: '', amount: 300, _pending: '提现到账账户待确认',
+    });
+  });
+
+  it('资金池词典 resolvePayMethodAccount：零钱/零钱通/余额/余额宝/花呗 → 精确资金池账户，银行卡保留尾号', () => {
+    expect(resolvePayMethodAccount('零钱')).toBe('微信零钱');
+    expect(resolvePayMethodAccount('零钱通')).toBe('微信零钱通');
+    expect(resolvePayMethodAccount('微信零钱通')).toBe('微信零钱通');
+    expect(resolvePayMethodAccount('余额')).toBe('支付宝余额');
+    expect(resolvePayMethodAccount('账户余额')).toBe('支付宝余额');
+    expect(resolvePayMethodAccount('账户余额(个人余额)')).toBe('支付宝余额');
+    expect(resolvePayMethodAccount('支付宝余额')).toBe('支付宝余额');
+    expect(resolvePayMethodAccount('余额宝')).toBe('余额宝');
+    expect(resolvePayMethodAccount('花呗')).toBe('花呗');
+    expect(resolvePayMethodAccount('花呗分期(24期)')).toBe('花呗');
+    expect(resolvePayMethodAccount('工商银行储蓄卡(1055)')).toBe('工商银行储蓄卡(1055)');
+    expect(resolvePayMethodAccount('')).toBe('');
+  });
+
+  it('detectPoolTarget：从文本识别资金池转入目标，优先零钱通/余额宝，未命中返回空串', () => {
+    expect(detectPoolTarget('余额充值')).toBe('支付宝余额');
+    expect(detectPoolTarget('零钱充值')).toBe('微信零钱');
+    expect(detectPoolTarget('转入零钱通')).toBe('微信零钱通');
+    expect(detectPoolTarget('转入余额宝')).toBe('余额宝');
+    expect(detectPoolTarget('话费自动充值')).toBe('');
   });
 });
 
@@ -488,5 +632,88 @@ describe('列映射预览：buildColumnMap / parseTxType / parseAoaWithMap', () 
     const map = buildColumnMap(['日期', '类型', '金额', '备注', '账户']);
     const res = parseAoaWithMap(aoa, map);
     expect(res.rows[0].account).toBe('现金'); // 账户列在第 5 列也被正确推断
+  });
+});
+
+describe('dedupeCrossBill：跨账单宽松配对去重（A/B 两类）', () => {
+  type ImportRow = import('./import').ImportRow;
+  // 构造测试行的最小工厂：默认同日同额同卡支出，可覆盖字段
+  const row = (over: Partial<ImportRow> & { line: number }): ImportRow => ({
+    date: '2026-09-01', type: 'expense', amount: 50, account: '工商银行储蓄卡(1055)',
+    ...over,
+  });
+
+  it('A 类双记：同日同额同卡同向 + 财付通信号 → 保留信息全的一条，另一条跳过', () => {
+    const a = row({ line: 1, orderNo: 'A1', note: '某餐厅', payee: '微信支付' });   // 钱包账单（信息全）
+    const b = row({ line: 2, orderNo: 'B1', note: '财付通-微信支付', payee: '' });   // 银行账单
+    const res = dedupeCrossBill([a, b]);
+    expect(res.removed).toBe(1);
+    expect(res.rows).toHaveLength(1);
+    expect(res.rows[0].line).toBe(1); // 保留信息更全的订单号/收款方行
+    expect(res.notes[0].reason).toContain('跨账单重复');
+  });
+
+  it('A 类转账-收支双记：充值转账 vs 银行支出 → 保留转账一条', () => {
+    const t = row({ line: 1, type: 'transfer', amount: 100, account: '工商银行储蓄卡(1055)', toAccount: '微信零钱', orderNo: 'C1', note: '零钱充值' });
+    const e = row({ line: 2, amount: 100, note: '财付通-充值', orderNo: 'B2' });
+    const res = dedupeCrossBill([t, e]);
+    expect(res.removed).toBe(1);
+    expect(res.rows).toHaveLength(1);
+    expect(res.rows[0]).toMatchObject({ type: 'transfer', toAccount: '微信零钱', amount: 100 });
+  });
+
+  it('B 类两腿：同日同额同卡 一收一支 + 信号 → 合并为一条转账（银行卡 → 资金池）', () => {
+    const income = row({ line: 1, type: 'income', amount: 100, note: '零钱充值', orderNo: 'C2' });
+    const expense = row({ line: 2, amount: 100, note: '财付通', orderNo: 'B3' });
+    const res = dedupeCrossBill([income, expense]);
+    expect(res.removed).toBe(2); // 两腿原行均不再单独入账
+    expect(res.rows).toHaveLength(1);
+    expect(res.rows[0]).toMatchObject({
+      type: 'transfer', account: '工商银行储蓄卡(1055)', toAccount: '微信零钱', amount: 100, basis: expect.stringContaining('转账'),
+    });
+    expect(res.rows[0]._pending).toBeUndefined(); // 目标资金池可识别 → 无需待确认
+  });
+
+  it('B 类目标资金池识别不出 → 合并行标待确认（绝不臆测）', () => {
+    const income = row({ line: 1, type: 'income', amount: 100, note: '平台转入', orderNo: 'C3' });
+    const expense = row({ line: 2, amount: 100, note: '财付通', orderNo: 'B4' });
+    const res = dedupeCrossBill([income, expense]);
+    expect(res.rows[0]).toMatchObject({ type: 'transfer', toAccount: undefined, _pending: '跨账单合并目标账户待确认' });
+  });
+
+  it('配对不唯一（同日同额同卡候选 3 条）→ 全部标待确认，绝不自动删', () => {
+    const a = row({ line: 1, note: '财付通', orderNo: 'A1' });
+    const b = row({ line: 2, note: '财付通', orderNo: 'A2' });
+    const c = row({ line: 3, note: '财付通', orderNo: 'A3' });
+    const res = dedupeCrossBill([a, b, c]);
+    expect(res.removed).toBe(0);
+    expect(res.rows).toHaveLength(3);
+    expect(res.rows.every((r) => r._pending === '跨账单配对不唯一，待确认')).toBe(true);
+  });
+
+  it('无跨账单信号（无财付通/微信支付/支付宝）→ 同卡同额同向也不配对（真实的两笔消费）', () => {
+    const a = row({ line: 1, note: '午餐' });
+    const b = row({ line: 2, note: '晚餐' });
+    const res = dedupeCrossBill([a, b]);
+    expect(res.removed).toBe(0);
+    expect(res.rows).toHaveLength(2);
+  });
+
+  it('非银行卡账户（资金池）不参与配对；服务费子行（_rowKey）不参与配对', () => {
+    const pool = row({ line: 1, account: '微信零钱', note: '财付通' });
+    const card = row({ line: 2, note: '财付通' });
+    const fee = row({ line: 2, _rowKey: '2:fee', amount: 0.11, note: '财付通' });
+    const res = dedupeCrossBill([pool, card, fee]);
+    expect(res.removed).toBe(0); // 资金池行与服务费行都不与银行卡行构成配对
+    expect(res.rows).toHaveLength(3);
+  });
+
+  it('不同日期/不同卡不配对（同额同信号）', () => {
+    const a = row({ line: 1, note: '财付通' });
+    const b = row({ line: 2, date: '2026-09-02', note: '财付通' });
+    const c = row({ line: 3, account: '招商银行储蓄卡(6222)', note: '财付通' });
+    const res = dedupeCrossBill([a, b, c]);
+    expect(res.removed).toBe(0);
+    expect(res.rows).toHaveLength(3);
   });
 });

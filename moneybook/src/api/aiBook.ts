@@ -107,20 +107,23 @@ function matchAccount(name: string, accounts: Account[]): Account | undefined {
   return accounts.find((a) => norm(a.name).includes(norm(target)));
 }
 
-/** 分类模糊匹配（限定 type 方向）；返回匹配项或 undefined */
+/**
+ * 分类模糊匹配（限定 type 方向）：精确 → 包含 → 归一包含 三级；返回匹配项或 undefined。
+ * 修复背景（历史缺陷）：旧实现把「包含」「归一包含」写成数组回调，`find` 里拿布尔值
+ * 与目标字符串做 `===`，恒为 false，导致只有精确匹配生效——AI 返回「餐费」等别名必落空。
+ */
 function matchCategory(name: string, type: string, cats: Category[]): Category | undefined {
   if (!name) return undefined;
   const target = name.trim();
+  if (!target) return undefined;
   const pool = cats.filter((c) => c.type === type);
-  for (const fn of [
-    (c: Category) => c.name,
-    (c: Category) => c.name.includes(target),
-    (c: Category) => norm(c.name).includes(norm(target)),
-  ]) {
-    const hit = pool.find((c) => fn(c) === target);
-    if (hit) return hit;
-  }
-  return undefined;
+  let hit = pool.find((c) => c.name === target);        // ① 精确
+  if (hit) return hit;
+  hit = pool.find((c) => c.name.includes(target));      // ② 包含（别名部分命中）
+  if (hit) return hit;
+  const nt = norm(target);                              // ③ 归一包含（去空白/符号/大小写）
+  if (!nt) return undefined;
+  return pool.find((c) => norm(c.name).includes(nt));
 }
 
 /** 将一条解析行映射为可写入的记账项；匹配失败的标记 unmatched，不抛错 */

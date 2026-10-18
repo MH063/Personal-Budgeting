@@ -164,6 +164,22 @@ describe('toBookItem：账户/分类模糊匹配', () => {
     expect(item?.unmatched).toContain('category');
   });
 
+  it('分类包含匹配：别名「餐」命中「餐饮」（修复前仅精确匹配生效，此路必落空）', () => {
+    const item = toBookItem({ type: 'expense', amount: 10, accountName: '现金', categoryName: '餐' }, accounts, cats);
+    expect(item?.categoryId).toBe(1);
+  });
+
+  it('分类归一匹配：去空白后「餐  饮」命中「餐饮」', () => {
+    const item = toBookItem({ type: 'expense', amount: 10, accountName: '现金', categoryName: '餐  饮' }, accounts, cats);
+    expect(item?.categoryId).toBe(1);
+  });
+
+  it('收入方向过滤：收入行的支出分类名不跨类型命中', () => {
+    const item = toBookItem({ type: 'income', amount: 10, accountName: '现金', categoryName: '餐' }, accounts, cats);
+    expect(item?.categoryId).toBeUndefined();
+    expect(item?.unmatched).toContain('category');
+  });
+
   it('转账需匹配转入账户（toAccountId）', () => {
     const item = toBookItem({ type: 'transfer', amount: 100, accountName: '现金', toAccountName: '微信' }, accounts, cats);
     expect(item?.toAccountId).toBe(2);

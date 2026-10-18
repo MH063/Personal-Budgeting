@@ -32,8 +32,11 @@ describe('classifyBuiltinCategory', () => {
 });
 
 describe('classifyBuiltinCategory / 分类名对齐系统默认分类', () => {
-  it('词典分类名均属系统默认 14 条分类之内', () => {
-    const defaults = ['餐饮', '交通', '购物', '居住', '娱乐', '医疗', '教育', '其他支出', '工资', '奖金', '兼职', '投资收益', '红包', '其他收入'];
+  it('词典分类名均属系统默认 22 条分类之内', () => {
+    const defaults = [
+      '餐饮', '交通', '购物', '居住', '娱乐', '医疗', '教育', '人情', '通讯', '旅行', '美妆', '运动', '数码', '宠物', '宝宝', '网购',
+      '工资', '奖金', '兼职', '投资收益', '红包', '其他收入',
+    ];
     for (const r of BUILTIN_CATEGORY_RULES) {
       expect(defaults).toContain(r.category);
     }

@@ -3,7 +3,7 @@
  * 覆盖：本地关键词分类、账户包含匹配、AI 返回 JSON 的稳健解析、结果过滤（只收清单内名称）。
  */
 import { describe, it, expect } from 'vitest';
-import { classifyLocal, matchAccountLocal, parseAiSuggestion, classifyConfidence, lowConfidenceNames } from './aiSuggest';
+import { classifyLocal, matchAccountLocal, parseAiSuggestion, classifyConfidence, lowConfidenceNames, LOCAL_CATEGORY_RULES } from './aiSuggest';
 
 describe('classifyLocal：本地关键词分类', () => {
   it('按关键词命中对应分类', () => {
@@ -15,6 +15,15 @@ describe('classifyLocal：本地关键词分类', () => {
   it('无关键词命中返回 null（不臆造）', () => {
     expect(classifyLocal('随手记')).toBeNull();
     expect(classifyLocal('')).toBeNull();
+  });
+  it('对齐新分类体系：话费归通讯、网购归网购、工资归工资（不再出现伪分类「工资/收入」）', () => {
+    expect(classifyLocal('充话费 50 元')).toBe('通讯');
+    expect(classifyLocal('在淘宝下单')).toBe('网购');
+    expect(classifyLocal('收到本月工资')).toBe('工资');
+    expect(classifyLocal('健身房年卡')).toBe('运动');
+    expect(classifyLocal('买台新电脑')).toBe('数码');
+    expect(LOCAL_CATEGORY_RULES.some((r) => r.category === '工资/收入')).toBe(false);
+    expect([...new Set(LOCAL_CATEGORY_RULES.map((r) => r.category))].length).toBe(LOCAL_CATEGORY_RULES.length);
   });
 });
 
