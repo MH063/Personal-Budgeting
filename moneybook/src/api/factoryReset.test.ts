@@ -24,13 +24,15 @@ vi.mock('./db', () => ({
   }),
 }));
 
-import { execute } from './db';
+import { execute, select } from './db';
 
 // 捕获所有 execute 调用（复用 mock 实例）
 const execMock = vi.mocked(execute);
+const selectMock = vi.mocked(select);
 
 beforeEach(() => {
   execMock.mockClear();
+  selectMock.mockClear();
 });
 
 describe('resetAllData：恢复出厂设置', () => {
@@ -78,5 +80,29 @@ describe('resetAllData：恢复出厂设置', () => {
   it('返回被清空的业务表数量（不含 sqlite_sequence）', async () => {
     const result = await resetAllData();
     expect(result.clearedTables).toBe(3); // transactions / categories / accounts
+  });
+
+  it('某张表在库中已不存在（DELETE 报 no such table）→ 跳过该表继续清空，不中断恢复出厂设置', async () => {
+    // 模拟历史双源 DDL 清理遗留：sqlite_master 有 import_logs 记录但对象缺失，
+    // 对其 DELETE 抛 no such table；其余表与重建操作照常成功
+    selectMock.mockImplementation(async (sql: string) => {
+      if (String(sql).includes('sqlite_master')) {
+        return [{ name: 'transactions' }, { name: 'import_logs' }, { name: 'sqlite_sequence' }];
+      }
+      return [];
+    });
+    execMock.mockImplementation(async (sql: string, _params: unknown[] = []) => {
+      if (String(sql).includes('import_logs')) {
+        throw new Error('no such table: main.import_logs');
+      }
+      return { rowsAffected: 1, lastInsertId: 1 };
+    });
+
+    const result = await resetAllData();
+    // 缺表被跳过，其余业务表正常清空
+    expect(result.clearedTables).toBe(1); // transactions
+    // 未因缺表中断：重建默认分类 / 默认账本照常执行
+    expect(execMock.mock.calls.some(([sql]) => String(sql).includes('INSERT INTO categories'))).toBe(true);
+    expect(execMock.mock.calls.some(([sql]) => String(sql).includes("INSERT INTO ledgers (name) VALUES ('默认账本')"))).toBe(true);
   });
 });

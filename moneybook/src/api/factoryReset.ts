@@ -62,8 +62,19 @@ export async function resetAllData(): Promise<ResetResult> {
     );
     for (const t of tables) {
       if (t.name === 'sqlite_sequence') continue; // 自增序列统一在最后重置
-      await execute(`DELETE FROM "${t.name}"`, []);
-      clearedTables += 1;
+      try {
+        await execute(`DELETE FROM "${t.name}"`, []);
+        clearedTables += 1;
+      } catch (e) {
+        // 容错：sqlite_master 有表记录但实际对象缺失（如历史双源 DDL 清理遗留的
+        // import_logs 缺表）时，DELETE 报 no such table；跳过该表继续清空其余数据，
+        // 避免「恢复出厂设置」被一张孤立缺表整体卡死。其余错误照常抛出回滚。
+        if ((e as Error).message.includes('no such table')) {
+          console.warn(`[factoryReset] 表 ${t.name} 在库中已不存在，跳过清空`);
+          continue;
+        }
+        throw e;
+      }
     }
     // 重置自增序列：让新数据 id 从 1 重新开始（与全新安装一致）
     await execute('DELETE FROM sqlite_sequence', []);

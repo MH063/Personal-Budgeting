@@ -85,6 +85,12 @@ fn get_migrations() -> Vec<Migration> {
             sql: include_str!("../migrations/013_schema_gaps.sql"),
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 14,
+            description: "import_logs",
+            sql: include_str!("../migrations/014_import_logs.sql"),
+            kind: MigrationKind::Up,
+        },
     ]
 }
 
