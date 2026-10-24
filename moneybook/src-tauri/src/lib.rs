@@ -73,6 +73,18 @@ fn get_migrations() -> Vec<Migration> {
             sql: include_str!("../migrations/011_dedupe_preset_categories.sql"),
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 12,
+            description: "amortize_months",
+            sql: include_str!("../migrations/012_amortize_months.sql"),
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 13,
+            description: "schema_gaps",
+            sql: include_str!("../migrations/013_schema_gaps.sql"),
+            kind: MigrationKind::Up,
+        },
     ]
 }
 

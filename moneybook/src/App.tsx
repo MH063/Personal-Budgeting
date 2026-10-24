@@ -29,6 +29,7 @@ const ReconcilePage = lazy(() => import('@/pages/Reconcile'));
 const Settings = lazy(() => import('@/pages/Settings'));
 const CalendarPage = lazy(() => import('@/pages/Calendar/CalendarPage'));
 const InsightsPage = lazy(() => import('@/pages/Insights'));
+const FinancialCheckupPage = lazy(() => import('@/pages/FinancialCheckup'));
 
 function PageFallback() {
   return <div className="flex items-center justify-center py-24 text-sm text-muted">加载中…</div>;
@@ -107,6 +108,7 @@ export default function App() {
             {/* 统计"洞察"已并入 /insights，旧地址重定向 */}
             <Route path="/stats/insights" element={<Navigate to="/insights" replace />} />
             <Route path="/insights" element={<InsightsPage />} />
+            <Route path="/financial-checkup" element={<FinancialCheckupPage />} />
             <Route path="/trash" element={<TrashPage />} />
             <Route path="/reconcile" element={<ReconcilePage />} />
             <Route path="/calendar" element={<CalendarPage />} />

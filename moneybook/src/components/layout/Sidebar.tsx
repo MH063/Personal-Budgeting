@@ -2,7 +2,7 @@ import { NavLink } from 'react-router-dom';
 import {
   LayoutDashboard, ReceiptText,
   PiggyBank, Users, BarChart3, Trash2, FileCheck2, Settings as SettingsIcon,
-  Calendar, Sparkles, Target,
+  Calendar, Sparkles, Target, HeartPulse,
 } from 'lucide-react';
 import { useUIStore } from '@/stores/useUIStore';
 
@@ -13,6 +13,7 @@ const NAV = [
   { to: '/loans', icon: Users, label: '借贷' },
   { to: '/stats', icon: BarChart3, label: '统计' },
   { to: '/insights', icon: Sparkles, label: '智能洞察' },
+  { to: '/financial-checkup', icon: HeartPulse, label: '财务体检' },
   { to: '/calendar', icon: Calendar, label: '日历' },
   { to: '/reconcile', icon: FileCheck2, label: '银行对账' },
   { to: '/trash', icon: Trash2, label: '回收站' },
