@@ -1,16 +1,6 @@
 // 统一数据库访问层
 // 本系统最终运行在本机桌面（Tauri + SQLite / moneybook.db），
 // 因此仅保留 @tauri-apps/plugin-sql 原生物理后端；已彻底移除浏览器 sql.js / localStorage 分支。
-import {
-  SAVINGS_ACCOUNTS_SQL,
-  LOAN_ACCRUED_SQL,
-  RECURRING_SQL,
-  HOLDINGS_SQL,
-  TXN_TEMPLATE_SQL,
-  TRASH_SQL,
-  RECON_SQL,
-  RECON_TRANSACTION_COL,
-} from './schema';
 import { isBrowserPreview } from '@/lib/runtime';
 
 export interface ExecResult {

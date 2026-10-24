@@ -68,15 +68,23 @@ export async function listHoldingSummaries(): Promise<(HoldingSummary & { accoun
   );
 }
 
-/** 某账本下全部投资账户的持仓市值合计（含到净资产/类型汇总） */
+/** 某账本下全部投资账户的持仓市值合计（含到净资产/类型汇总）。
+ *  查询失败（如迁移未执行导致表缺失）时降级为 0 并打日志，避免单表问题拖垮净资产/分析等上游调用。 */
 export async function getLedgerInvestmentMarketValue(): Promise<number> {
-  const rows = await select<{ total: number }>(
-    `SELECT COALESCE(SUM(h.quantity*h.price),0) AS total
-     FROM account_holdings h
-     JOIN accounts a ON h.account_id = a.id
-     WHERE a.type = 'investment' AND a.ledger_id = $1`, [currentLedgerId()]
-  );
-  return Number(rows[0]?.total ?? 0);
+  try {
+    const rows = await select<{ total: number }>(
+      `SELECT COALESCE(SUM(h.quantity*h.price),0) AS total
+       FROM account_holdings h
+       JOIN accounts a ON h.account_id = a.id
+       WHERE a.type = 'investment' AND a.ledger_id = $1`, [currentLedgerId()]
+    );
+    return Number(rows[0]?.total ?? 0);
+  } catch (e) {
+    // 关键位置日志：持仓市值查询失败时按 0 处理，保证净资产/体检/分析页面不整体崩溃
+    // eslint-disable-next-line no-console
+    console.error('[holdings] 持仓市值查询失败，已按 0 处理：', e);
+    return 0;
+  }
 }
 
 /** 调整投资账户现金（delta 为带符号的增减额）；仅对 investment 账户生效 */

@@ -55,7 +55,7 @@ export default function MonthlyCheckup() {
     return hit ? hit.value : 'category';
   });
   useEffect(() => { setKV(DIM_STORE_KEY, dim); }, [dim]);
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, error } = useQuery({
     queryKey: ['stats', 'local-diagnosis', month, dim],
     queryFn: () => analyzeLocally(month, { dimension: dim }),
   });
@@ -78,8 +78,14 @@ export default function MonthlyCheckup() {
         </div>
       </div>
 
-      {isLoading || !data ? (
+      {isLoading ? (
         <p className="py-10 text-center text-sm text-muted">分析中…</p>
+      ) : error ? (
+        <p className="py-10 text-center text-sm" style={{ color: 'var(--color-danger)' }}>
+          分析失败：{error instanceof Error ? error.message : String(error)}。若提示缺表/缺列，请重启应用让数据库迁移自动补齐。
+        </p>
+      ) : !data ? (
+        <p className="py-10 text-center text-sm text-muted">暂无数据。</p>
       ) : (
         <>
           <LocalDiagnosisPanel d={data} />
