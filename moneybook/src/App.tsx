@@ -30,6 +30,8 @@ const Settings = lazy(() => import('@/pages/Settings'));
 const CalendarPage = lazy(() => import('@/pages/Calendar/CalendarPage'));
 const InsightsPage = lazy(() => import('@/pages/Insights'));
 const FinancialCheckupPage = lazy(() => import('@/pages/FinancialCheckup'));
+// 导入解析结果：独立窗口页面（Tauri 多窗口加载，不带 AppShell 布局，可自由调整窗口大小）
+const ImportPreviewPage = lazy(() => import('@/pages/Settings/import/ImportPreviewPage'));
 
 function PageFallback() {
   return <div className="flex items-center justify-center py-24 text-sm text-muted">加载中…</div>;
@@ -87,6 +89,8 @@ export default function App() {
       <UpdateDialog />
       <Suspense fallback={<PageFallback />}>
         <Routes>
+          {/* 导入解析结果：独立窗口路由（在主窗口 AppShell 之外，渲染整页无侧边栏） */}
+          <Route path="/import-preview" element={<ImportPreviewPage />} />
           <Route element={<AppShell />}>
             <Route path="/" element={<Dashboard />} />
             <Route path="/transactions" element={<TransactionsPage />} />

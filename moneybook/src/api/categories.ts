@@ -21,9 +21,20 @@ export async function listCategories(type?: 'income' | 'expense'): Promise<Categ
   );
 }
 
+/**
+ * 创建分类（幂等防重：历史缺陷——手动/导入自动创建均无查重，同名分类可被反复新建，
+ * 造成分类管理页「成对重复 / 多余分类」膨胀）。
+ * 同名同类型且未删除（is_active=1）的分类直接复用其 id，不再新建一行；
+ * 软删除（is_active=0）的行视为可重建，允许创建新行。
+ */
 export async function createCategory(p: {
   name: string; type: Category['type']; icon?: string; color?: string;
 }): Promise<number> {
+  const dup = await select<{ id: number }>(
+    `SELECT id FROM categories WHERE name = $1 AND type = $2 AND is_active = 1 LIMIT 1`,
+    [p.name, p.type]
+  );
+  if (dup.length) return dup[0].id;
   const r = await execute(
     `INSERT INTO categories (name, type, icon, color, sort_order) VALUES ($1,$2,$3,$4,0)`,
     [p.name, p.type, p.icon ?? '', p.color ?? '#6B7280']

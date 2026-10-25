@@ -18,10 +18,11 @@ import { Button } from '@/components/ui/button';
 import { Hint } from '@/components/ui/hint';
 import ReconPanel from './import/ReconPanel';
 import ImportHistoryPanel from './import/ImportHistoryPanel';
-import PreviewDialog from './import/PreviewDialog';
 import PasswordDialog, { type PasswordModalState } from './import/PasswordDialog';
-import { decodeText, type ReconItem } from './import/helpers';
+import { decodeText, IMPORT_PREVIEW_KEY, type ReconItem } from './import/helpers';
 import { isTauriRuntime } from '@/lib/runtime';
+import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 
 // 表头别名推断已迁移至 import.buildColumnMap（含多字段认领策略）。
 // 导入类型下拉选项、「待核对」项类型见 ./import/helpers；各弹窗与独立区块已拆为 ./import 下的子组件。
@@ -59,9 +60,6 @@ export default function ImportManage() {
   const [platformId, setPlatformId] = useState<string>('auto');
   // 「导入后待核对」：可疑行已按推测口径入库，此处按库中交易 id 逐条修正（改类型/账户）
   const [recon, setRecon] = useState<ReconItem[]>([]);
-  // 解析结果弹窗：选择文件识别成功后以弹窗形式集中展示（用户要求，避免大表格挤在页面）；
-  // 弹窗内可编辑修正并直接「开始导入」，关闭后预览数据保留在内存直至下次解析
-  const [previewOpen, setPreviewOpen] = useState(false);
   // 导入历史「跳过明细」弹窗与「补导入」二次确认的状态已内聚到子组件 ImportHistoryPanel
   // 用户自定义资金流向规则的编辑 UI 已集中到「设置 → 智能规则」（用户要求规则统一一栏），
   // 本页仅保留自动学习（修正后沉淀规则）与跳转入口。
@@ -72,6 +70,23 @@ export default function ImportManage() {
   // 载入导入历史（审计）
   useEffect(() => {
     void listImportLogs().then(setImportHist).catch(() => { /* 桌面库不可用时静默 */ });
+  }, []);
+
+  // 监听独立预览窗口的「开始导入」提交：携带编辑后的行与「将创建账户」改名结果，在此执行真实导入。
+  // 用 ref 持有「最新渲染的 doImport」，避免 useEffect 首次闭包捕获过期 state（assignAccount/refs 等）。
+  const doImportRef = useRef<((rowsArg?: ImportRow[]) => Promise<void>) | undefined>(undefined);
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    const un = listen<{ rows: ImportRow[]; pendingAccounts: string[] }>(
+      'import:preview-submit',
+      (ev) => {
+        const { rows: submitRows, pendingAccounts: accs } = ev.payload;
+        if (!submitRows?.length) return;
+        if (accs?.length) setPendingAccounts(accs);
+        void doImportRef.current?.(submitRows);
+      }
+    );
+    return () => { void un.then((f) => f()); };
   }, []);
 
   /** 将单个文件的二进制解析为二维数组（csv 需解码，xlsx 用 SheetJS 读取） */
@@ -100,11 +115,10 @@ export default function ImportManage() {
     setParseWarn(warn);
     // 计算「将被自动创建」的账户（正常行 + 被恢复的跳过行都会用到，一并统计）
     const accNames = [...new Set(merged.map((r) => normalizeAccountName(r.account)).filter(Boolean))];
-    setPendingAccounts(
-      accNames
-        .filter((n) => !(refs2.accounts ?? []).some((a) => accountsMatch(a.name, n)))
-        .filter((n) => n !== '未识别账户' && n !== '导入账户')
-    );
+    const toCreate = accNames
+      .filter((n) => !(refs2.accounts ?? []).some((a) => accountsMatch(a.name, n)))
+      .filter((n) => n !== '未识别账户' && n !== '导入账户');
+    setPendingAccounts(toCreate);
     // 标注疑似重复行：订单号已在库/批内，或批内无订单号同指纹
     const seenOrder = new Set<string>(refs2.existingOrderNos ?? []);
     const batchOrder = new Set<string>();
@@ -129,8 +143,26 @@ export default function ImportManage() {
     const skipCount = skippedRows.length;
     toast.success(`解析到 ${rows.length} 条交易${skipCount ? `，另有 ${skipCount} 条被跳过（可手动恢复）` : ''}。${refs2.accounts.length} 个账户、${refs2.categories.length} 个分类可用于匹配。`);
     if (dup.size) toast.warning(`检测到 ${dup.size} 条疑似重复流水，导入时将被自动跳过。`);
-    // 识别成功：弹窗集中展示解析结果（概要 + 可编辑预览 + 开始导入）
-    setPreviewOpen(true);
+    // 识别成功：预览数据写入快照，打开独立窗口集中展示（可自由调整窗口大小，替代原弹窗）
+    showPreviewWindow(merged, dup, warn, toCreate);
+  }
+
+  /**
+   * 把解析预览写入 localStorage 快照并打开「导入解析结果」独立窗口（Tauri 桌面端）。
+   * 独立窗口页面（#/import-preview）从快照重建可编辑预览，编辑实时写回快照；
+   * 窗口已打开时聚焦复用，页面通过 storage 事件刷新为新快照。纯浏览器预览无多窗口
+   * 能力：仅提示，解析数据保留在本页内存供继续操作。
+   */
+  function showPreviewWindow(rowsArg: ImportRow[], dup: Set<number>, warn: string[], toCreate: string[]) {
+    localStorage.setItem(
+      IMPORT_PREVIEW_KEY,
+      JSON.stringify({ rows: rowsArg, dupLines: [...dup], parseWarn: warn, pendingAccounts: toCreate })
+    );
+    if (isTauriRuntime()) {
+      void invoke('open_import_preview').catch((e) => toast.warning(`打开独立预览窗口失败：${String(e)}`));
+    } else {
+      toast.info('桌面端将在独立窗口展示解析结果（当前为浏览器预览）');
+    }
   }
 
   /** 解析一个已就绪的源文件（非 zip 或已解密 zip）为交易行，供导入流程使用 */
@@ -458,13 +490,17 @@ export default function ImportManage() {
     return learned.map((c) => c.match);
   }
 
-  async function doImport() {
-    if (!validRows.length) return toast.error('请先选择并解析文件');
+  async function doImport(rowsArg?: ImportRow[]) {
+    if (!rowsArg && !validRows.length) { toast.error('请先选择并解析文件'); return; }
     setBusy(true);
     try {
-      // 只导入「有效行」：被规则跳过、尚未手动恢复的行留在列表里等用户处理
-      let finalRows = validRows;
-      if (assignAccount !== '0' && refs) {
+      // 只导入「有效行」：被规则跳过、尚未手动恢复的行留在列表里等用户处理。
+      // 独立预览窗口提交时传入编辑后的行（rowsArg），优先采用传入行而非本页内存行；
+      // 本页内存行仅用于「整批归入账户」等批量改写前的基准。
+      let finalRows = rowsArg ?? validRows;
+      // 批量归入账户仅作用于「本页内存行」；独立窗口提交的行已在窗口内逐行编辑/确认，
+      // 不再套用批量覆盖，避免冲掉用户刚做的账户修正
+      if (!rowsArg && assignAccount !== '0' && refs) {
         const target = refs.accounts.find((a) => String(a.id) === assignAccount);
         if (target) finalRows = validRows.map((r) => ({ ...r, account: target.name }));
       }
@@ -555,14 +591,16 @@ export default function ImportManage() {
       setRows((prev) => prev.filter((r) => r._skippedReason));
       setDupLines(new Set());
       setParseWarn([]);
-      // 导入完成：关闭解析结果弹窗，回到页面顶部的选择文件入口
-      setPreviewOpen(false);
+      // 导入完成：清除独立窗口预览快照（窗口已随提交关闭，避免下次误用旧数据）
+      localStorage.removeItem(IMPORT_PREVIEW_KEY);
     } catch (err) {
       toast.error(`导入失败：${(err as Error).message}`);
     } finally {
       setBusy(false);
     }
   }
+  // 独立窗口提交监听使用「最新渲染」的 doImport（见上方 useEffect 说明）
+  doImportRef.current = doImport;
 
   /** 把某次导入的跳过明细还原为可导入行，追加到当前预览后即可重新导入（补导入）。
    *  还原时：仅取持久化的原始字段（日期/金额/账户等），清除跳过标记作为正常行；
@@ -596,8 +634,10 @@ export default function ImportManage() {
       } catch { /* 单条还原失败忽略，其余照常补导入 */ }
     }
     if (!restored.length) { toast.error('该批跳过明细缺少可还原的关键字段（日期/金额），无法补导入'); return false; }
-    setRows((prev) => [...prev, ...restored]);
-    setPreviewOpen(true);
+    const mergedRows = [...rows, ...restored];
+    setRows(mergedRows);
+    // 补导入预览：重新写入快照并打开/聚焦独立窗口展示
+    showPreviewWindow(mergedRows, dupLines, parseWarn, pendingAccounts);
     toast.success(`已将 ${restored.length} 条跳过的数据加入待导入列表，请核对后开始导入`);
     return true;
   }
@@ -707,7 +747,7 @@ export default function ImportManage() {
               </select>
             </label>
           )}
-          <Button size="sm" onClick={doImport} disabled={!validRows.length || busy}>{busy ? '导入中…' : `导入 ${validRows.length} 条`}</Button>
+          <Button size="sm" onClick={() => void doImport()} disabled={!validRows.length || busy}>{busy ? '导入中…' : `导入 ${validRows.length} 条`}</Button>
           <Button type="button" variant="outline" size="sm" onClick={aiClassifyRows} disabled={!validRows.length || classifying} title="为缺分类/账户的行按备注智能补全（未开可发送明细时仅本地规则）">
             {classifying ? '归类中…' : '智能归类'}
           </Button>
@@ -779,28 +819,6 @@ export default function ImportManage() {
       />
 
       <ImportHistoryPanel logs={importHist} onRestoreSkips={restoreSkipsToImport} />
-
-      {/* 解析结果弹窗：选择文件识别成功后集中展示（用户要求，避免预览大表格挤在页面）。
-          弹窗内可编辑修正误判，确认后直接「开始导入」；关闭仅收起弹窗，预览数据保留在内存。
-          （「跳过明细」弹窗与补导入二次确认已内聚到 ImportHistoryPanel。） */}
-      <PreviewDialog
-        open={previewOpen}
-        onClose={() => setPreviewOpen(false)}
-        rows={rows}
-        validCount={validRows.length}
-        total={total}
-        pendingRows={pendingRows}
-        dupLines={dupLines}
-        parseWarn={parseWarn}
-        pendingAccounts={pendingAccounts}
-        onRenamePending={renamePending}
-        onPatchRow={patchRow}
-        onConfirmRow={confirmRow}
-        onRemoveRow={removeRow}
-        onClearPending={() => setRows((prev) => prev.map((r) => (r._pending ? { ...r, _pending: undefined } : r)))}
-        onImport={() => void doImport()}
-        busy={busy}
-      />
 
       {/* 加密账单解压密码对话框：选中 zip 后弹出，输入密码即时重试解密 */}
       <PasswordDialog

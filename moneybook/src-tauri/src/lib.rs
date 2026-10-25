@@ -91,6 +91,12 @@ fn get_migrations() -> Vec<Migration> {
             sql: include_str!("../migrations/014_import_logs.sql"),
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 15,
+            description: "ensure_categories_unique",
+            sql: include_str!("../migrations/015_ensure_categories_unique.sql"),
+            kind: MigrationKind::Up,
+        },
     ]
 }
 
@@ -143,6 +149,8 @@ pub fn run() {
             // 数据目录：前端 Database.load 的连接串 / 便携迁移
             datadir::get_db_url,
             datadir::migrate_to_portable,
+            // 应用内多窗口：导入解析结果独立窗口
+            commands::window::open_import_preview,
         ])
         // 数据目录决策结果 + 事务连接持有器：全局共享
         .manage(db_location)

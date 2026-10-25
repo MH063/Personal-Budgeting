@@ -20,6 +20,12 @@ export const IMPORT_TYPE_OPTIONS: { value: ImportRow['type']; label: string }[] 
 ];
 
 /**
+ * 导入预览快照的 localStorage 键（主窗口 → 独立窗口的数据通道）。
+ * 快照结构：{ rows, dupLines[], parseWarn[], pendingAccounts[] }，validCount/total/pendingRows 由 rows 派生。
+ */
+export const IMPORT_PREVIEW_KEY = 'moneybook.importPreview.v1';
+
+/**
  * 「导入后待核对」项：可疑行（去向为账单推测）已按推测口径入库，
  * 携带库中交易 id 与解析后的账户 id，便于就地改类型/账户后回写该交易。
  */
