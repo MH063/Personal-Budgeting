@@ -8,7 +8,8 @@ import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Select, type SelectOption } from '@/components/ui/select';
 import {
-  getFinancialCheckup, type CheckupMetrics, type CheckupDiagnosisItem,
+  getFinancialCheckup, resolveCheckupWindow, type CheckupPeriodKind,
+  type CheckupMetrics, type CheckupDiagnosisItem,
   type CashFlowKind, type DebtNature, type InsuranceKind, type InsurancePolicy,
   INSURANCE_KIND_LABELS,
 } from '@/api/stats';
@@ -205,14 +206,26 @@ const DIAG_ICON = {
   risk: XCircle,
 };
 
-/** 财务体检：按「家庭财务四张表」九项指标体检 + 同比 + 诊断结论 */
+/** 体检周期选项（月 / 季度 / 半年 / 年） */
+const PERIOD_OPTIONS: SelectOption[] = [
+  { value: 'month', label: '月度' },
+  { value: 'quarter', label: '季度' },
+  { value: 'halfYear', label: '半年度' },
+  { value: 'year', label: '年度' },
+];
+
+/** 财务体检：按「家庭财务四张表」十一项指标体检 + 同比 + 诊断结论（支持 月/季度/半年/年 周期） */
 export default function FinancialCheckup() {
+  // 体检周期类型 + 周期内锚点月份（切换任一即触发重新体检）
+  const [periodKind, setPeriodKind] = useState<CheckupPeriodKind>('month');
   const [ym, setYm] = useState(dayjs().format('YYYY-MM'));
   const queryClient = useQueryClient();
   const { data, isLoading } = useQuery({
-    queryKey: ['stats', 'checkup', ym],
-    queryFn: () => getFinancialCheckup(ym),
+    queryKey: ['stats', 'checkup', periodKind, ym],
+    queryFn: () => getFinancialCheckup({ kind: periodKind, ym }),
   });
+  // 锚点月份解析出的实际统计周期标签（如 2026Q3 / 2026H2 / 2026），用于提示当前体检覆盖区间
+  const periodLabel = resolveCheckupWindow(periodKind, ym).label;
 
   // 保单列表（保障覆盖配置）：页面直接读写 settings/kv，保存后需刷新体检数据重新计算覆盖率
   const [policies, setPolicies] = useState<InsurancePolicy[]>([]);
@@ -230,7 +243,7 @@ export default function FinancialCheckup() {
     const ok = editingId ? await updateInsurancePolicy(editingId, p) : await addInsurancePolicy(p);
     if (ok) {
       setPolicies(getInsurancePolicies());
-      await queryClient.invalidateQueries({ queryKey: ['stats', 'checkup', ym] });
+      await queryClient.invalidateQueries({ queryKey: ['stats', 'checkup', periodKind, ym] });
       // 关键位置日志：保单保存结果，便于排查覆盖率不刷新的问题
       // eslint-disable-next-line no-console
       console.log(`[checkup] 保单${editingId ? '更新' : '新增'}成功：`, p.name);
@@ -243,7 +256,7 @@ export default function FinancialCheckup() {
     const ok = await deleteInsurancePolicy(id);
     if (ok) {
       setPolicies(getInsurancePolicies());
-      await queryClient.invalidateQueries({ queryKey: ['stats', 'checkup', ym] });
+      await queryClient.invalidateQueries({ queryKey: ['stats', 'checkup', periodKind, ym] });
     }
     setDeleteTarget(null);
   };
@@ -273,17 +286,32 @@ export default function FinancialCheckup() {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h2 className="text-xl font-bold">财务体检</h2>
-          <p className="mt-1 text-sm text-muted">按「家庭财务四张表」十一项指标做年度体检，先看储蓄率，再看债务与流动性</p>
+          <p className="mt-1 text-sm text-muted">按「家庭财务四张表」十一项指标做月度/季度/半年度/年度体检，先看储蓄率，再看债务与流动性</p>
         </div>
-        <label className="flex items-center gap-2 text-sm text-muted">
-          体检月份
-          <input
-            type="month"
-            value={ym}
-            onChange={(e) => e.target.value && setYm(e.target.value)}
-            className="rounded-lg border border-[var(--border)] bg-[var(--card)] px-3 py-1.5 text-sm text-[var(--fg)] outline-none focus:border-[var(--color-primary)]"
+        <div className="flex flex-wrap items-center gap-3">
+          {/* 周期类型：月 / 季度 / 半年 / 年 */}
+          <Select
+            value={periodKind}
+            onChange={(v) => setPeriodKind(v as CheckupPeriodKind)}
+            options={PERIOD_OPTIONS}
+            className="w-28"
           />
-        </label>
+          <label className="flex items-center gap-2 text-sm text-muted">
+            锚点月份
+            <input
+              type="month"
+              value={ym}
+              onChange={(e) => e.target.value && setYm(e.target.value)}
+              className="rounded-lg border border-[var(--border)] bg-[var(--card)] px-3 py-1.5 text-sm text-[var(--fg)] outline-none focus:border-[var(--color-primary)]"
+            />
+          </label>
+          {/* 非月度周期：提示锚点月份实际落入的统计区间（如 2026-10 → 2026Q4 / 2026H2 / 2026） */}
+          {periodKind !== 'month' && (
+            <span className="rounded-lg bg-[var(--card)] px-2.5 py-1.5 text-xs font-medium text-muted">
+              统计区间：{periodLabel}
+            </span>
+          )}
+        </div>
       </div>
 
       {isLoading || !m ? (
@@ -294,7 +322,7 @@ export default function FinancialCheckup() {
           <Card className="p-5">
             <div className="flex flex-wrap items-end justify-between gap-4">
               <div>
-                <div className="text-sm text-muted">① 总收入（{data?.ym}）</div>
+                <div className="text-sm text-muted">① 总收入（{data?.period?.label}）</div>
                 <div className="mt-1 text-3xl font-bold" style={{ color: lv!.income === 'good' ? LEVEL_COLOR.good : LEVEL_COLOR.none }}>
                   {formatMoney(m.totalIncome)}
                 </div>
@@ -552,7 +580,7 @@ export default function FinancialCheckup() {
               <div>
                 <div className="text-xs text-muted">当前净资产</div>
                 <div className={`mt-1 text-lg font-bold ${(ng?.currentNet ?? 0) < 0 ? 'text-[var(--color-danger)]' : ''}`}>{formatMoney(ng?.currentNet ?? 0)}</div>
-                <div className="mt-0.5 text-xs text-muted">总资产（含持仓市值）− 总负债</div>
+                <div className="mt-0.5 text-xs text-muted">初始余额基线 + 累计收支（记账口径）</div>
               </div>
               <div>
                 <div className="text-xs text-muted">参考时点净资产</div>
@@ -576,7 +604,7 @@ export default function FinancialCheckup() {
               <p className="text-xs text-muted">
                 {ng && ng.monthsCovered > 0 && ng.monthsCovered < 12
                   ? `记账数据不足 12 个月，参考时点取最早记录（${ng.baseMonth}），成长率按已有记录估算，会随记账完善而趋准。`
-                  : '净资产 = 总资产（含持仓市值）− 总负债；成长率 =（当前净资产 ÷ 参考时点净资产）− 1，参考时点优先去年同期，衡量家庭财富积累速度；净资产为负或参考值约等于 0 时无法估算。'}
+                  : '本指标按记账收支累计口径计算：当前与参考净资产均 = 初始余额基线 + 累计收支，不含持仓市值浮盈与手动调余额；成长率 =（当前净资产 ÷ 参考时点净资产）− 1，参考时点优先去年同期，衡量记账驱动的财富积累速度；净资产为负或参考值约等于 0 时无法估算。'}
               </p>
             </CardContent>
           </Card>
@@ -619,6 +647,12 @@ export default function FinancialCheckup() {
                 color={ef?.level === 'good' ? '#10B981' : ef?.level === 'warn' ? '#F59E0B' : ef?.level === 'risk' ? '#EF4444' : '#94A3B8'}
               />
               <p className="text-xs text-muted">目标 = 近 6 个月月均支出 × {ef?.targetMonths ?? 6} 个月；进度 = 流动资产 ÷ 目标金额，≥100% 达标、50%-100% 过半、&lt;50% 缺口较大。与「⑧ 流动性覆盖月数」互补：覆盖月数看能撑几个月，本指标看距离 6 个月目标还差多少钱。</p>
+              <p className="text-xs text-muted">
+                应急储备是应对失业、疾病、突发大额支出等现金流冲击的「安全垫」，理财建议通常储备 3-6 个月开销，此处按 6 个月从严衡量。
+                流动资产仅计现金、银行存款与电子钱包余额——随时可支取、价值稳定；基金/股票/理财等投资不计入，因其变现需时间且可能亏损。
+                已达标时可将超额部分转投收益更高的资产；缺口较大时建议从每月结余中固定划出一笔、优先补足缺口，并每月复查进度。
+                近 6 个月无支出记录时无法估算。
+              </p>
             </CardContent>
           </Card>
 
@@ -750,7 +784,7 @@ export default function FinancialCheckup() {
               <CardTitle className="text-base">口径说明</CardTitle>
             </CardHeader>
             <CardContent className="space-y-1.5 text-xs leading-relaxed text-muted">
-              <p>· 收入类指标按「体检月份」统计；债务收入比分母取近 12 个月有收入月份的平均值，流动性分母取近 6 个月有支出月份的平均值。</p>
+              <p>· 收入类指标按「体检周期」统计；债务收入比分母取近 12 个月有收入月份的平均值，流动性分母取近 6 个月有支出月份的平均值。</p>
               <p>· 总负债 = 借入且未结清的剩余本金；月供估算：分期贷款按剩余本金 ÷ 剩余期数，到期一次按剩余本金 ÷ 剩余月数折算；既无期数也无到期日的借贷无法估算月供。</p>
               <p>· 短期负债 = 剩余期数 ≤ 12 期或剩余期限 ≤ 1 年的借入负债；到期分布按剩余期限分「12 个月内 / 1-3 年 / 3 年以上」三桶，无法估算归「期限未知」。</p>
               <p>· 现金流三分：按收支分类名映射为经营性/投资性/融资性；转账不产生现金流不计入，融资性主要由借贷/还款类交易体现。</p>
@@ -758,7 +792,7 @@ export default function FinancialCheckup() {
               <p>· 支出结构体检：按分类名把当月支出映射为刚性（住房/餐饮/通勤/通讯/医疗/教育/保险等必需）与可选（娱乐/旅行/购物/游戏等非必需），未命中归「未分类」；恩格尔系数 = 食品餐饮类支出 ÷ 总支出，&gt;0.6 贫困、0.5-0.6 温饱、0.4-0.5 小康、&lt;0.4 富裕。</p>
               <p>· 负债清偿周期：按「月均结余（近 12 个月月均收入 − 近 6 个月月均支出）全部用于还债」估算还清全部借入负债所需月数，忽略利息；结余不足以覆盖估算月供或无结余时视为难以清偿。无期数且无到期日的借贷不参与月供合计。</p>
               <p>· 收入集中度：收入分劳动/资本/转移三大类，单一类别超 70% 预警；集中度指数为赫芬达尔指数（各占比平方和）。</p>
-              <p>· 净资产成长性：净资产 = 总资产（含持仓市值）− 总负债；成长率 =（当前净资产 ÷ 参考时点净资产）− 1，参考时点优先去年同期月份，记账不足 12 个月时按最早记录估算，会随记账完善而趋准；净资产为负或参考值约等于 0 时无法估算。</p>
+              <p>· 净资产成长性：净资产 = 总资产（含持仓市值）− 总负债；成长率 =（当前净资产 ÷ 参考时点净资产）− 1，参考时点优先去年同周期（月/季度/半年/年体检分别取去年同月/同季/同半年/同年末），记账不足 12 个月时按最早记录估算，会随记账完善而趋准；净资产为负或参考值约等于 0 时无法估算。</p>
               <p>· 应急储备达成进度：目标 = 近 6 个月月均支出 × 6 个月；进度 = 流动资产 ÷ 目标金额，≥100% 达标、50%-100% 过半、&lt;50% 缺口较大；缺口 = max(0, 目标 − 流动资产)。与「⑧ 流动性覆盖月数」互补：覆盖月数看能撑几个月，本指标看距离 6 个月目标还差多少钱；近 6 个月无支出记录时无法估算。</p>
               <p>· 保障覆盖率（人力资本）：责任缺口法，建议保额 = 寿险/意外 年收入×10、重疾 年收入×5、医疗 100 万；综合覆盖率 = Σ已配置保额 ÷ Σ建议保额；年收入基线取近 12 个月有收入月份月均收入 × 12，保单保存在本机设置中。记账数据不足 12 个月时基线按已有月份平均估算，覆盖率会暂时偏低，属正常现象。</p>
             </CardContent>

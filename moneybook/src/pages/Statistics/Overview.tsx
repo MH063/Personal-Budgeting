@@ -42,7 +42,7 @@ export default function Overview() {
         <StatCard title="本月收入" value={thisMonth?.income ?? 0} color="#10B981" />
         <StatCard title="本月支出" value={thisMonth?.expense ?? 0} color="#EF4444" />
         <StatCard title="净资产" value={nw?.netWorth ?? 0} color="#1E6FA9" />
-        <StatCard title="本月储蓄率" value={(rate?.rate ?? 0) * 100} color="#8B5CF6" suffix="%" />
+        <StatCard title="本月储蓄率" value={rate?.rate != null ? rate.rate * 100 : null} color="#8B5CF6" suffix="%" />
       </div>
 
       {typeof cur !== 'undefined' && prev && lastYear && (

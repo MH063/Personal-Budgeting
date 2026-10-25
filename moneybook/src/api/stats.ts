@@ -73,12 +73,17 @@ export async function getNetWorth() {
 }
 
 /** 净资产趋势
- *  当前净资产 = 总资产 - 总负债（实时查 accounts 表，含初始余额与应收/应付虚拟账户）
- *  历史趋势 = 资产/负债初始余额基线 + 每月累计的 "收入 - 支出"
+ *  currentNet = 实时净资产（总资产 - 总负债，查 accounts 表当前余额 + 持仓市值）
+ *  history   = 资产/负债初始余额基线 + 每月累计的 "收入 - 支出"
  *    - 借出/借入/还款（lend/borrow/repay）与转账对净资产都是中性的：
  *      借出：真实账户 -金额，但应收款 +金额，相互抵消，净值为 0；
  *      借入：真实账户 +金额，但应付款 +金额（负债），仍然抵消。
- *      因此趋势只累计收入与支出，最后一个月累计值 + 初始基线 = 当前净资产。
+ *      因此趋势只累计收入与支出。
+ *  口径提醒（history 与 currentNet 的差异属预期设计）：
+ *    - history 只累计记账收支：不含持仓市值浮盈、不含手工调余额/导入修正；
+ *    - 基线 = 当前所有账户初始余额之和，中途新建带初始余额的账户会回填到全部历史月份；
+ *    - currentNet 供页面卡片展示；需要「两端同口径」的计算（如净资产成长性）
+ *      应使用 history 末端值作为当前净资产，勿与 currentNet 混用。
  */
 export async function getNetWorthTrend() {
   const { netWorth: currentNet } = await getNetWorth();
@@ -158,7 +163,11 @@ export async function getSavingsRate(start: string, end: string) {
   const income = row?.income ?? 0;
   const expense = row?.expense ?? 0;
   const surplus = income - expense;
-  const rate = income > 0 ? surplus / income : 0;
+  // 储蓄率 = 结余 ÷ 收入；仅当收入 > 0 时有意义。
+  // 历史缺陷：income ≤ 0（无收入或负收入月，如退款/收入冲销）时一律返回 0，
+  // 会把「无法估算」与「结余为 0」混淆，甚至抹掉负收入月的真实结余方向。
+  // 现改为收入 ≤ 0 时返回 null（无法估算），由调用方显示「—」。
+  const rate = income > 0 ? surplus / income : null;
   return { income, expense, surplus, rate };
 }
 
@@ -1021,21 +1030,25 @@ export interface NetAssetGrowth {
 
 /**
  * 净资产成长性：当前净资产较参考时点的变化率。
- * 口径说明：参考时点优先取「去年同期月份」；记账不足 12 个月时取最早一条历史记录，
+ * 口径说明：currentNet 与 history 必须为同一口径（建议传入 history 末端值，即基线 + 累计收支）。
+ * 历史净资产无法按日重建，趋势只累计记账收支、不含持仓市值浮盈与手动调余额；
+ * 若把「实时净资产（含市值）」当分子、而参考点来自不含市值的趋势，两端基准错位，
+ * 成长率会被系统性扭曲。参考时点优先取「去年同期月份」；记账不足 12 个月时取最早一条历史记录，
  * 与保障覆盖的年收入基线口径一致（不足时按已有记录估算，避免无数据时误判）。
  * 参考净资产为 0 或负数时仍用其绝对值作分母，避免正负翻转导致方向失真。
  */
 export function calcNetAssetGrowth(
   currentNet: number,
   history: { month: string; net_worth: number }[],
-  asOfYm: string
+  asOfYm: string,
+  referenceYm?: string
 ): NetAssetGrowth {
   if (history.length === 0) {
     // 完全无历史记录：无参考点，成长率不可估算；净资产为负仍按风险提示
     return { currentNet, baseNet: 0, baseMonth: '', growthRate: null, monthsCovered: 0, level: currentNet < -0.0001 ? 'risk' : 'none' };
   }
-  // 优先取去年同期月份；记账不足一年时回退到最早记录
-  const targetYm = dayjs(`${asOfYm}-01`).subtract(1, 'year').format('YYYY-MM');
+  // 参考时点：优先显式指定（区间体检为同比区间末月），缺省回退「去年同期月份」；记账不足一年时回退到最早记录
+  const targetYm = referenceYm ?? dayjs(`${asOfYm}-01`).subtract(1, 'year').format('YYYY-MM');
   const sorted = [...history].sort((a, b) => (a.month < b.month ? -1 : 1));
   const ref = sorted.find((r) => r.month === targetYm) ?? sorted[0];
   const baseNet = ref.net_worth;
@@ -1328,8 +1341,79 @@ export function buildCheckupDiagnosis(m: CheckupMetrics, extra?: CheckupExtra): 
   return out;
 }
 
+/** 体检周期类型：月 / 季度 / 半年 / 年 */
+export type CheckupPeriodKind = 'month' | 'quarter' | 'halfYear' | 'year';
+
+/** 体检周期锚点：kind 决定区间口径，ym 为周期内的任一月（YYYY-MM） */
+export interface CheckupPeriod {
+  kind: CheckupPeriodKind;
+  ym: string;
+}
+
+/** 由周期锚点解析出的统计时间窗（区间首尾 + 同比区间首尾） */
+export interface CheckupWindow {
+  kind: CheckupPeriodKind;
+  /** 周期标签：如 2026-10 / 2026Q3 / 2026H2 / 2026 */
+  label: string;
+  /** 区间首日（YYYY-MM-DD） */
+  start: string;
+  /** 区间末日（YYYY-MM-DD） */
+  end: string;
+  /** 同比区间首日 */
+  lastStart: string;
+  /** 同比区间末日 */
+  lastEnd: string;
+  /** 区间月数（月 1 / 季 3 / 半年 6 / 年 12） */
+  months: number;
+  /** 同比区间末月（YYYY-MM，净资产成长性的参考时点） */
+  referenceYm: string;
+}
+
+/** 将周期锚点解析为统计时间窗。
+ *  季度/半年/年按锚点所在周期定位（如 2026-10 → 2026Q4 / 2026H2 / 2026），
+ *  同比一律取「上一年的同一周期」（月→去年同月、季→去年同季、半年→去年同半年、年→前一年全年）。 */
+export function resolveCheckupWindow(kind: CheckupPeriodKind, ym: string): CheckupWindow {
+  const anchor = dayjs(`${ym}-01`);
+  const year = anchor.year();
+  const quarter = Math.floor(anchor.month() / 3) + 1;
+  const half = anchor.month() < 6 ? 1 : 2;
+  let startMonth: dayjs.Dayjs;
+  let label: string;
+  let months: number;
+  switch (kind) {
+    case 'month':
+      startMonth = anchor.startOf('month');
+      label = anchor.format('YYYY-MM');
+      months = 1;
+      break;
+    case 'quarter':
+      startMonth = dayjs(`${year}-01-01`).month((quarter - 1) * 3).startOf('month');
+      label = `${year}Q${quarter}`;
+      months = 3;
+      break;
+    case 'halfYear':
+      startMonth = dayjs(`${year}-01-01`).month((half - 1) * 6).startOf('month');
+      label = `${year}H${half}`;
+      months = 6;
+      break;
+    case 'year':
+      startMonth = dayjs(`${year}-01-01`);
+      label = String(year);
+      months = 12;
+      break;
+  }
+  const start = startMonth.format('YYYY-MM-DD');
+  const end = startMonth.add(months - 1, 'month').endOf('month').format('YYYY-MM-DD');
+  const lastStart = dayjs(start).subtract(1, 'year').format('YYYY-MM-DD');
+  const lastEnd = dayjs(end).subtract(1, 'year').format('YYYY-MM-DD');
+  const referenceYm = dayjs(lastEnd).format('YYYY-MM');
+  return { kind, label, start, end, lastStart, lastEnd, months, referenceYm };
+}
+
 export interface CheckupResult {
   ym: string;
+  /** 周期锚点解析出的统计时间窗（区间首尾 + 同比区间首尾） */
+  period: CheckupWindow;
   /** 去年同期总收入（同比锚点） */
   lastYearIncome: number;
   metrics: CheckupMetrics;
@@ -1354,22 +1438,28 @@ export interface CheckupResult {
 
 /**
  * 财务体检：按「家庭财务四张表」口径计算十一项指标 + 同比 + 诊断结论。
- * - 收入类：当月收入按分类聚合（劳动收入占比/来源数量）+ 去年同期收入（同比）；
+ * - 周期：支持 月/季度/半年/年 四种（period.kind），区间收支按周期累计，
+ *   同比取上一年的同一周期；月均口径（近 6 月支出 / 近 12 月收入）不随周期变化；
+ * - 收入类：区间收入按分类聚合（劳动收入占比/来源数量）+ 去年同期收入（同比）；
  * - 负债类：借入未结清剩余本金（总负债/DSR/短期占比）+ 负债清偿周期；
  * - 现金流量：流动资产 ÷ 近 6 个月月均支出（流动性覆盖 + 应急储备达成进度）+ 支出结构；
- * - 净资产：当前净资产（总资产 − 总负债）较去年同期的成长率；
+ * - 净资产：当前净资产（总资产 − 总负债）较去年同周期的成长率；
  * - 人力资本：保障覆盖按责任缺口法计算（保单存于 settings/kv，年收入基线 = 近 12 个月月均收入 × 12）。
  */
-export async function getFinancialCheckup(ym: string = dayjs().format('YYYY-MM')): Promise<CheckupResult> {
+export async function getFinancialCheckup(period?: string | Partial<CheckupPeriod>): Promise<CheckupResult> {
+  const p: CheckupPeriod = typeof period === 'string'
+    ? { kind: 'month', ym: period }
+    : { kind: period?.kind ?? 'month', ym: period?.ym ?? dayjs().format('YYYY-MM') };
   const lid = currentLedgerId();
-  const start = dayjs(`${ym}-01`).format('YYYY-MM-DD');
-  const end = dayjs(start).endOf('month').format('YYYY-MM-DD');
-
-  // 各查询的时间窗只依赖 ym，相互无数据依赖 → 全部并行执行，减少切换月份时的等待
-  const lastStart = dayjs(start).subtract(1, 'year').format('YYYY-MM-DD');
-  const lastEnd = dayjs(lastStart).endOf('month').format('YYYY-MM-DD');
-  const expStart = dayjs(start).subtract(5, 'month').startOf('month').format('YYYY-MM-DD');
-  const incStart = dayjs(start).subtract(11, 'month').startOf('month').format('YYYY-MM-DD');
+  const win = resolveCheckupWindow(p.kind, p.ym);
+  const start = win.start;
+  const end = win.end;
+  // 各查询的时间窗只依赖周期锚点，相互无数据依赖 → 全部并行执行，减少切换周期时的等待
+  const lastStart = win.lastStart;
+  const lastEnd = win.lastEnd;
+  // 近 6 个月 / 近 12 个月滚动起点：以区间末日为基准（月周期时与「当月首 − 5/11 个月」等价）
+  const expStart = dayjs(end).subtract(5, 'month').startOf('month').format('YYYY-MM-DD');
+  const incStart = dayjs(end).subtract(11, 'month').startOf('month').format('YYYY-MM-DD');
 
   const [incomeCats, expenseCats, [cur], [last], expRows, incRows, [liq], loans, netTrend] = await Promise.all([
     // 当月收入按分类聚合（劳动收入占比/来源数量/收入集中度）
@@ -1463,15 +1553,22 @@ export async function getFinancialCheckup(ym: string = dayjs().format('YYYY-MM')
   const debtPayoff = calcDebtPayoff(loans, avgMonthlyIncome - avgMonthlyExpense, asOf);
   // 支出结构体检：刚性/可选占比 + 恩格尔系数（按当月支出分类名关键词映射）
   const spendingStructure = calcSpendingStructure(expenseByCategory);
-  // 净资产成长性：当前净资产 = 总资产 − 总负债（实时）；参考时点优先去年同期，记账不足一年时取最早记录
-  const netAssetGrowth = calcNetAssetGrowth(netTrend.currentNet, netTrend.history, ym);
+  // 净资产成长性：为保持「当前」与「参考」两端同口径，当前值取趋势序列（基线 + 累计收支）中
+  // 「不超过体检月末」的最后一个点，而非实时净资产（含持仓市值/余额调整）。历史市值无法重建，
+  // 趋势只累计记账收支，故成长率衡量的是记账驱动的财富积累，不受行情浮盈与手动调余额干扰；
+  // 若完全没有历史记录，回退到实时净资产（此时成长率本就不可估算，仅用于负净资产的风险提示）。
+  const trendAsOf = dayjs(end).format('YYYY-MM');
+  const trendPoints = netTrend.history.filter((h) => h.month <= trendAsOf);
+  const trendCurrent = trendPoints.length ? trendPoints[trendPoints.length - 1].net_worth : netTrend.currentNet;
+  const netAssetGrowth = calcNetAssetGrowth(trendCurrent, netTrend.history, trendAsOf, win.referenceYm);
   // 应急储备达成进度：目标 = 近 6 个月月均支出 × 6 个月（复用流动性覆盖的流动资产与月均支出，不新增查询）
   const emergencyFund = calcEmergencyFund(liq?.total ?? 0, avgMonthlyExpense);
   // 第九项卡片直接展示综合覆盖率
   metrics.insuranceCoverage = insurance.totalRatio;
 
   return {
-    ym,
+    ym: p.ym,
+    period: win,
     lastYearIncome: last?.income ?? 0,
     metrics,
     cashFlow,

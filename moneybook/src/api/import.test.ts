@@ -643,23 +643,32 @@ describe('dedupeCrossBill：跨账单宽松配对去重（A/B 两类）', () => 
     ...over,
   });
 
-  it('A 类双记：同日同额同卡同向 + 财付通信号 → 保留信息全的一条，另一条跳过', () => {
+  it('A 类双记：同日同额同卡同向 + 财付通信号 → 不再自动删除，两条均标待确认', () => {
     const a = row({ line: 1, orderNo: 'A1', note: '某餐厅', payee: '微信支付' });   // 钱包账单（信息全）
     const b = row({ line: 2, orderNo: 'B1', note: '财付通-微信支付', payee: '' });   // 银行账单
     const res = dedupeCrossBill([a, b]);
-    expect(res.removed).toBe(1);
-    expect(res.rows).toHaveLength(1);
-    expect(res.rows[0].line).toBe(1); // 保留信息更全的订单号/收款方行
-    expect(res.notes[0].reason).toContain('跨账单重复');
+    expect(res.removed).toBe(0); // 不再自动删除，杜绝误删真实独立消费
+    expect(res.rows).toHaveLength(2);
+    expect(res.rows.every((r) => r._pending?.includes('待确认'))).toBe(true);
+    expect(res.notes[0].reason).toContain('跨账单疑似重复');
   });
 
-  it('A 类转账-收支双记：充值转账 vs 银行支出 → 保留转账一条', () => {
+  it('A 类双记中的真实独立消费（同日同额同卡+信号）→ 仅标待确认，绝不删除', () => {
+    const a = row({ line: 1, note: '财付通-某餐厅' });
+    const b = row({ line: 2, note: '财付通-某餐厅' });
+    const res = dedupeCrossBill([a, b]);
+    expect(res.removed).toBe(0);
+    expect(res.rows).toHaveLength(2); // 两笔均保留，交由用户核对
+    expect(res.rows.every((r) => r._pending?.includes('待确认'))).toBe(true);
+  });
+
+  it('A 类转账-收支双记：充值转账 vs 银行支出 → 两条均标待确认（不再自动删）', () => {
     const t = row({ line: 1, type: 'transfer', amount: 100, account: '工商银行储蓄卡(1055)', toAccount: '微信零钱', orderNo: 'C1', note: '零钱充值' });
     const e = row({ line: 2, amount: 100, note: '财付通-充值', orderNo: 'B2' });
     const res = dedupeCrossBill([t, e]);
-    expect(res.removed).toBe(1);
-    expect(res.rows).toHaveLength(1);
-    expect(res.rows[0]).toMatchObject({ type: 'transfer', toAccount: '微信零钱', amount: 100 });
+    expect(res.removed).toBe(0);
+    expect(res.rows).toHaveLength(2);
+    expect(res.rows.every((r) => r._pending?.includes('待确认'))).toBe(true);
   });
 
   it('B 类两腿：同日同额同卡 一收一支 + 信号 → 合并为一条转账（银行卡 → 资金池）', () => {
@@ -671,7 +680,7 @@ describe('dedupeCrossBill：跨账单宽松配对去重（A/B 两类）', () => 
     expect(res.rows[0]).toMatchObject({
       type: 'transfer', account: '工商银行储蓄卡(1055)', toAccount: '微信零钱', amount: 100, basis: expect.stringContaining('转账'),
     });
-    expect(res.rows[0]._pending).toBeUndefined(); // 目标资金池可识别 → 无需待确认
+    expect(res.rows[0]._pending).toBe('跨账单两腿（充值/提现）合并，待确认'); // 合并也标待确认，用户核对合并正确性
   });
 
   it('B 类目标资金池识别不出 → 合并行标待确认（绝不臆测）', () => {

@@ -290,9 +290,11 @@ function crossBillInfoScore(r: ImportRow): number {
 /**
  * 跨账单宽松配对去重（A/B 两类），落库前调用：
  * - A 类（双记）：同日 + 同额 + 同卡 + 跨账单信号（钱包侧绑卡行 ↔ 银行侧财付通行）
- *   → 同一笔付款被两个账单各记一次，保留信息全的一条，另一条跳过并写导入日志；
+ *   → 不再自动删除（历史缺陷：会把「同日同额同卡」的真实独立消费误删）；
+ *     两条均标 _pending 待确认，由用户在导入结果页核对后修正；
  * - B 类（两腿）：同日 + 同额 + 一收一支 + 同卡 + 跨账单信号（充值/提现两腿）
- *   → 合并为一条转账（银行卡 → 资金池），避免充值/提现被重复记成收支；
+ *   → 合并为一条转账（银行卡 → 资金池），合并行标 _pending 待确认
+ *     （目标识别不出时提示目标账户，识别出时仍提示核对合并）；
  * - 配对不唯一（同日同额同卡候选多于 2 条）→ 全部标 _pending 待确认，绝不自动删。
  * 仅对批内行生效；提现/充值派生的「服务费」子行（_rowKey）不参与配对。
  */
@@ -359,18 +361,23 @@ export function dedupeCrossBill(rows: ImportRow[]): { rows: ImportRow[]; removed
           orderNo: incomeRow.orderNo ?? expenseRow.orderNo,
           merchantOrderNo: incomeRow.merchantOrderNo ?? expenseRow.merchantOrderNo,
           line: expenseRow.line,
-          // 目标资金池识别不出时不臆测，标待确认
-          _pending: target ? undefined : '跨账单合并目标账户待确认',
+          // 合并行一律标待确认（识别不出目标时提示目标账户，识别出时也提示核对合并正确性）
+          _pending: target ? '跨账单两腿（充值/提现）合并，待确认' : '跨账单合并目标账户待确认',
           basis: '跨账单合并（充值/提现两腿）→ 转账（银行卡 → 资金池）',
         });
         notes.push({ line: a.line, reason: '跨账单两腿（同日/同额/同卡收支）已合并为一条转账' });
         notes.push({ line: b.line, reason: '跨账单两腿（同日/同额/同卡收支）已合并为一条转账' });
       } else {
-        // A 类：同向双记 / 转账与收支双记 → 保留信息全的一条，另一条跳过并写日志
+        // A 类：同向双记 / 转账与收支双记 → 不再自动删除。
+        // 历史缺陷：此前自动「保留信息全的一条、删除另一条」，会把同一天同一家店
+        // 两笔同额的真实独立消费误删且无确认机会。现两条均正常落库并标 _pending，
+        // 由用户在导入结果页核对；notes 仅提示「已标记待确认」，不再跳过任何一行。
         const keep = crossBillInfoScore(a) >= crossBillInfoScore(b) ? a : b;
         const drop = keep === a ? b : a;
-        removedLines.add(drop.line);
-        notes.push({ line: drop.line, reason: `跨账单重复（同日/同额/同卡双记）已跳过，保留第${keep.line}行` });
+        a._pending = '跨账单疑似重复（同日/同额/同卡双记），待确认';
+        b._pending = a._pending;
+        notes.push({ line: drop.line, reason: `跨账单疑似重复（同日/同额/同卡双记），已标记待确认（对照第${keep.line}行）` });
+        notes.push({ line: keep.line, reason: `跨账单疑似重复（同日/同额/同卡双记），已标记待确认（对照第${drop.line}行）` });
       }
     }
   }
@@ -456,13 +463,23 @@ export async function bulkImportTransactions(rows: ImportRow[], opts: { autoCrea
           catId = resolved.id;
           // ③ 精确/词典均未命中且勾选自动创建 → 新建：补全 icon/color（内置分类沿用专属样式，否则 📦/#6B7280 兜底）、sort_order=99
           if (catId == null && opts.autoCreate) {
-            const meta = BUILTIN_CATEGORY_META.get(resolved.name) ?? { icon: '📦', color: '#6B7280' };
-            const res = await execute(
-              `INSERT INTO categories (name, type, icon, color, sort_order) VALUES ($1, $2, $3, $4, 99)`,
-              [resolved.name, r.type, meta.icon, meta.color]
+            // 兜底查重：catMap 是导入开始时的全量快照，此处再按「名称+类型+未删除」复查一次，
+            // 防御边角场景（分类在导入期间被软删除等）下的重复新建——历史缺陷：导入反复新建同名分类
+            const exists = await select<{ id: number }>(
+              `SELECT id FROM categories WHERE name = $1 AND type = $2 AND is_active = 1 LIMIT 1`,
+              [resolved.name, r.type]
             );
-            catId = res.lastInsertId as number;
-            if (catId == null) throw new Error(`分类「${resolved.name}」创建失败`);
+            if (exists.length) {
+              catId = exists[0].id;
+            } else {
+              const meta = BUILTIN_CATEGORY_META.get(resolved.name) ?? { icon: '📦', color: '#6B7280' };
+              const res = await execute(
+                `INSERT INTO categories (name, type, icon, color, sort_order) VALUES ($1, $2, $3, $4, 99)`,
+                [resolved.name, r.type, meta.icon, meta.color]
+              );
+              catId = res.lastInsertId as number;
+              if (catId == null) throw new Error(`分类「${resolved.name}」创建失败`);
+            }
             catMap.set(`${resolved.name}|${r.type}`, catId);
             createdCategoriesSet.add(resolved.name);
           }

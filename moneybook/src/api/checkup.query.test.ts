@@ -119,10 +119,11 @@ describe('getFinancialCheckup：查询并行化', () => {
     // 保障覆盖：无保单 → 覆盖率 0（年收入基线 9000*12=108000）
     expect(r.insurance.totalRatio).toBe(0);
     expect(r.metrics.insuranceCoverage).toBe(0);
-    // 净资产成长性：当前净资产 = 150000 − 20000 = 130000；参考 2025-10 = 100000 + 10000 = 110000
-    expect(r.netAssetGrowth.currentNet).toBe(130000);
+    // 净资产成长性：统一记账积累口径，当前值 = 趋势末端（基线 100000 + 累计 10000 = 110000），
+    // 而非实时净资产（150000 − 20000 = 130000，含市值/余额调整）；两端同口径 → 成长率 0
+    expect(r.netAssetGrowth.currentNet).toBe(110000);
     expect(r.netAssetGrowth.baseMonth).toBe('2025-10');
-    expect(r.netAssetGrowth.growthRate).toBeCloseTo(20000 / 110000, 5);
+    expect(r.netAssetGrowth.growthRate).toBeCloseTo(0, 5);
     expect(r.netAssetGrowth.level).toBe('good');
     // 应急储备达成进度：流动资产 90000 ÷ 目标（3000 × 6 = 18000）= 500% 达标，可覆盖 30 个月
     expect(r.emergencyFund.liquidAssets).toBe(90000);

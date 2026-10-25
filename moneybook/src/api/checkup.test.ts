@@ -9,6 +9,7 @@ import {
   calcCashFlowSplit, classifyCashFlowKind,
   calcDebtStructure, calcIncomeConcentration, calcInsuranceCoverage, calcDebtPayoff,
   calcSpendingStructure, classifyExpenseNature, calcNetAssetGrowth, calcEmergencyFund,
+  resolveCheckupWindow,
   InsuranceKind, type InsuranceCoverage,
   type CheckupInput, type CheckupMetrics,
 } from './stats';
@@ -639,6 +640,18 @@ describe('calcNetAssetGrowth：净资产成长性', () => {
     const g = calcNetAssetGrowth(-5000, [], '2026-10');
     expect(g.level).toBe('risk');
   });
+
+  it('显式传入 referenceYm（季度/半年/年体检）→ 参考取指定时点而非默认去年同期', () => {
+    // 季度体检（2026Q3）：参考时点为 2025-09（win.referenceYm），历史里没有 2025-09 时取最早可用记录
+    const g = calcNetAssetGrowth(130000, [
+      { month: '2025-09', net_worth: 100000 },
+      { month: '2025-10', net_worth: 105000 },
+      { month: '2026-09', net_worth: 125000 },
+    ], '2026-09', '2025-09');
+    expect(g.baseMonth).toBe('2025-09');
+    expect(g.baseNet).toBe(100000);
+    expect(g.growthRate).toBeCloseTo(30000 / 100000, 5);
+  });
 });
 
 describe('buildCheckupDiagnosis：净资产成长性诊断', () => {
@@ -752,5 +765,67 @@ describe('buildCheckupDiagnosis：应急储备达成进度诊断', () => {
     });
     // 注意：healthy 会触发「应急储备充足」流动性结论，这里只断言不生成「进度/缺口」类结论
     expect(d.some((x) => ['应急储备目标已达成', '应急储备过半', '应急储备缺口较大'].includes(x.title))).toBe(false);
+  });
+});
+
+describe('resolveCheckupWindow：体检周期时间窗', () => {
+  it('月度：锚点即当月，同比取去年同月，referenceYm 为去年同月', () => {
+    const w = resolveCheckupWindow('month', '2026-10');
+    expect(w.label).toBe('2026-10');
+    expect(w.start).toBe('2026-10-01');
+    expect(w.end).toBe('2026-10-31');
+    expect(w.lastStart).toBe('2025-10-01');
+    expect(w.lastEnd).toBe('2025-10-31');
+    expect(w.months).toBe(1);
+    expect(w.referenceYm).toBe('2025-10');
+  });
+
+  it('季度：锚点 2026-10 → 2026Q4（10/11/12 月），同比取去年同季', () => {
+    const w = resolveCheckupWindow('quarter', '2026-10');
+    expect(w.label).toBe('2026Q4');
+    expect(w.start).toBe('2026-10-01');
+    expect(w.end).toBe('2026-12-31');
+    expect(w.lastStart).toBe('2025-10-01');
+    expect(w.lastEnd).toBe('2025-12-31');
+    expect(w.months).toBe(3);
+    expect(w.referenceYm).toBe('2025-12');
+  });
+
+  it('季度：锚点 2026-04 → 2026Q2（4/5/6 月）', () => {
+    const w = resolveCheckupWindow('quarter', '2026-04');
+    expect(w.label).toBe('2026Q2');
+    expect(w.start).toBe('2026-04-01');
+    expect(w.end).toBe('2026-06-30');
+    expect(w.months).toBe(3);
+  });
+
+  it('半年度：锚点 2026-10 → 2026H2（7-12 月），同比取去年下半年', () => {
+    const w = resolveCheckupWindow('halfYear', '2026-10');
+    expect(w.label).toBe('2026H2');
+    expect(w.start).toBe('2026-07-01');
+    expect(w.end).toBe('2026-12-31');
+    expect(w.lastStart).toBe('2025-07-01');
+    expect(w.lastEnd).toBe('2025-12-31');
+    expect(w.months).toBe(6);
+    expect(w.referenceYm).toBe('2025-12');
+  });
+
+  it('半年度：锚点 2026-03 → 2026H1（1-6 月）', () => {
+    const w = resolveCheckupWindow('halfYear', '2026-03');
+    expect(w.label).toBe('2026H1');
+    expect(w.start).toBe('2026-01-01');
+    expect(w.end).toBe('2026-06-30');
+    expect(w.months).toBe(6);
+  });
+
+  it('年度：锚点 2026 年内任一月 → 全年，同比取前一年全年', () => {
+    const w = resolveCheckupWindow('year', '2026-06');
+    expect(w.label).toBe('2026');
+    expect(w.start).toBe('2026-01-01');
+    expect(w.end).toBe('2026-12-31');
+    expect(w.lastStart).toBe('2025-01-01');
+    expect(w.lastEnd).toBe('2025-12-31');
+    expect(w.months).toBe(12);
+    expect(w.referenceYm).toBe('2025-12');
   });
 });

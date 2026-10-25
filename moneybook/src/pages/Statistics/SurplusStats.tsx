@@ -21,7 +21,7 @@ export default function SurplusStats() {
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-3">
         <StatCard title="本月收入" value={thisMonth?.income ?? 0} color="#10B981" />
         <StatCard title="本月支出" value={thisMonth?.expense ?? 0} color="#EF4444" />
-        <StatCard title="本月储蓄率" value={(rate?.rate ?? 0) * 100} color="#8B5CF6" suffix="%" />
+        <StatCard title="本月储蓄率" value={rate?.rate != null ? rate.rate * 100 : null} color="#8B5CF6" suffix="%" />
       </div>
       <div className="mt-6">
         <ChartCard title="近 6 个月收支趋势（盈余 = 收入 − 支出）">
