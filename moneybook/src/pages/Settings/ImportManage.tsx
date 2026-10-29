@@ -149,7 +149,7 @@ export default function ImportManage() {
 
   /**
    * 把解析预览写入 localStorage 快照并打开「导入解析结果」独立窗口（Tauri 桌面端）。
-   * 独立窗口页面（#/import-preview）从快照重建可编辑预览，编辑实时写回快照；
+   * 独立窗口页面（窗口标签 import-preview，由 main.tsx 按标签渲染）从快照重建可编辑预览，编辑实时写回快照；
    * 窗口已打开时聚焦复用，页面通过 storage 事件刷新为新快照。纯浏览器预览无多窗口
    * 能力：仅提示，解析数据保留在本页内存供继续操作。
    */

@@ -1,10 +1,24 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import ReactDOM from 'react-dom/client';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Toaster } from 'sonner';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import App from './App';
 import { useUIStore } from './stores/useUIStore';
+import { hydrateKV, getKV } from './api/kv';
+import { THEME_KEY } from './lib/constants';
+import { isTauriRuntime } from './lib/runtime';
+import ImportPreviewPage from './pages/Settings/import/ImportPreviewPage';
 import './index.css';
+
+/**
+ * 是否为「导入解析结果」独立窗口。
+ * 以窗口标签判定：Rust 侧以 "import-preview" 创建该窗口，两个窗口加载同一个 index.html。
+ * 历史缺陷：此前靠 WebviewUrl::App("index.html#/import-preview") 依赖 hash 路由，
+ * 多窗口首屏时 hash 路由匹配不稳定，导致新窗口整页白屏；改为标签判定后与 URL 无关。
+ */
+const isImportPreviewWindow =
+  isTauriRuntime() && getCurrentWindow().label === 'import-preview';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -51,11 +65,40 @@ function ThemedToaster() {
   );
 }
 
-ReactDOM.createRoot(document.getElementById('root')!).render(
+/**
+ * 独立预览窗口的主题引导：只从数据库偏好读取主题并应用，保证与主窗口视觉一致；
+ * 不执行主窗口的启动任务（自动记账 / 储蓄计提 / 更新检查），避免多窗口重复触发副作用。
+ */
+function PreviewThemeGate({ children }: { children: React.ReactNode }) {
+  useEffect(() => {
+    void (async () => {
+      try {
+        await hydrateKV();
+        const saved = (getKV(THEME_KEY, 'light') as 'light' | 'dark') || 'light';
+        useUIStore.getState().setTheme(saved);
+      } catch {
+        // 主题读取失败时保持默认浅色，不影响预览与导入功能
+      }
+    })();
+  }, []);
+  return <>{children}</>;
+}
+
+const root = ReactDOM.createRoot(document.getElementById('root')!);
+
+root.render(
   <React.StrictMode>
-    <QueryClientProvider client={queryClient}>
-      <App />
-      <ThemedToaster />
-    </QueryClientProvider>
+    {isImportPreviewWindow ? (
+      // 独立窗口：只渲染预览页（不挂载 App，避免启动任务、引导弹窗、更新检查在该窗口重复执行）
+      <PreviewThemeGate>
+        <ImportPreviewPage />
+        <ThemedToaster />
+      </PreviewThemeGate>
+    ) : (
+      <QueryClientProvider client={queryClient}>
+        <App />
+        <ThemedToaster />
+      </QueryClientProvider>
+    )}
   </React.StrictMode>
 );

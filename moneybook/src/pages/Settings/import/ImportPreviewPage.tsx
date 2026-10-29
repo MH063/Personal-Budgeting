@@ -8,7 +8,8 @@ import { IMPORT_PREVIEW_KEY } from './helpers';
 import ImportPreviewBody from './ImportPreviewBody';
 
 /**
- * 「导入解析结果」独立窗口页面（路由 #/import-preview，由主窗口 invoke open_import_preview 打开）。
+ * 「导入解析结果」独立窗口页面（由主窗口 invoke open_import_preview 打开；
+ * 该窗口标签为 import-preview，前端在 main.tsx 按标签直接渲染本页，不依赖 hash 路由）。
  * 数据通道：主窗口解析成功后把预览数据写入 localStorage 快照（IMPORT_PREVIEW_KEY），
  * 本页从快照重建可编辑预览，编辑实时写回快照；点「开始导入」时 emit import:preview-submit
  * 把编辑后的行与「将创建账户」改名结果交回主窗口执行真实导入，随后自动关闭本窗口。
