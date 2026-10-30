@@ -1,6 +1,7 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { SETTINGS_TABS } from '@/lib/settingsTabs';
+import { Input } from '@/components/ui/input';
 
 /* ============================================================
  * 使用说明 / 帮助页
@@ -307,53 +308,79 @@ function Kbd({ children }: { children: React.ReactNode }) {
 
 /**
  * 单个功能条目卡片：左侧高亮色条 + 图标 + 标题 + 用途 + 分步说明。
+ * 图标使用淡色底块、序号徽标使用「淡底 + 同色描边」，避免纯白数字压在浅色上对比不足。
  */
 function GuideCard({ item, accent }: { item: GuideItem; accent: string }) {
   return (
-    <div className="flex gap-3 rounded-xl border border-[var(--border)] bg-[var(--card)] p-4 shadow-sm transition-shadow hover:shadow-md">
+    <div className="flex h-full gap-3 rounded-xl border border-[var(--border)] bg-[var(--card)] p-4 shadow-sm transition-shadow hover:shadow-md">
       {/* 分彩色标识条 */}
       <div className="w-1 shrink-0 self-stretch rounded-full" style={{ backgroundColor: accent }} />
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
-          <span className="text-lg leading-none">{item.icon}</span>
-          <h4 className="font-semibold">{item.title}</h4>
+          <span
+            className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-base leading-none"
+            style={{ backgroundColor: `${accent}1A` }}
+          >
+            {item.icon}
+          </span>
+          <h4 className="break-words text-sm font-semibold">{item.title}</h4>
         </div>
-        <p className="mt-1 text-xs text-muted">{item.desc}</p>
-        <ol className="mt-2 space-y-1.5">
-          {item.steps.map((s, i) => (
-            <li key={i} className="flex gap-2 text-sm leading-relaxed text-[var(--fg)]">
-              <span
-                className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold text-white"
-                style={{ backgroundColor: accent }}
-              >
-                {i + 1}
-              </span>
-              <span>{s}</span>
-            </li>
-          ))}
-        </ol>
+        <p className="mt-1.5 text-xs leading-relaxed text-muted">{item.desc}</p>
+        {item.steps.length > 0 && (
+          <ol className="mt-2.5 space-y-1.5">
+            {item.steps.map((s, i) => (
+              <li key={i} className="flex gap-2 text-sm leading-relaxed text-[var(--fg)]">
+                <span
+                  className="mt-0.5 flex h-4 min-w-[1rem] shrink-0 items-center justify-center rounded-full border px-1 text-[10px] font-semibold tabular-nums"
+                  style={{ borderColor: `${accent}55`, backgroundColor: `${accent}14`, color: accent }}
+                >
+                  {i + 1}
+                </span>
+                <span className="min-w-0 break-words">{s}</span>
+              </li>
+            ))}
+          </ol>
+        )}
       </div>
     </div>
   );
 }
 
-/** 可折叠分组标题 */
-function GroupHeader({ g }: { g: GuideGroup }) {
-  const [open, setOpen] = useState(true);
+/**
+ * 分组标题（受控折叠）。
+ * 不再使用 sticky：多个分组的粘性标题在页面滚动时会互相覆盖、遮住上方内容，
+ * 改为普通卡片式标题栏，滚动时随内容自然移动，层级更稳定。
+ */
+function GroupHeader(
+  { g, open, onToggle, matched }:
+  { g: GuideGroup; open: boolean; onToggle: () => void; matched?: boolean }
+) {
   return (
-    <div className="sticky top-0 z-10 py-1 backdrop-blur">
+    <div>
       <button
         type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center gap-2 rounded-lg bg-[var(--card)]/90 px-2 py-2 text-left"
+        aria-expanded={open}
+        onClick={onToggle}
+        className="flex w-full items-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--card)] px-3 py-2.5 text-left shadow-sm transition-colors hover:border-[var(--color-primary)]"
       >
         <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: g.accent }} />
         <h3 className="flex-1 text-sm font-bold tracking-wide">{g.title}</h3>
-        <span className="text-xs text-muted transition-transform" style={{ transform: open ? 'rotate(180deg)' : 'none' }}>▾</span>
+        {matched && (
+          <span className="rounded-full bg-[var(--color-primary)]/10 px-2 py-0.5 text-[10px] text-[var(--color-primary)]">
+            匹配 {g.items.length} 项
+          </span>
+        )}
+        <span className="text-xs text-muted">{g.items.length} 项</span>
+        <span
+          className="text-xs text-muted transition-transform"
+          style={{ transform: open ? 'rotate(180deg)' : 'none' }}
+        >
+          ▾
+        </span>
       </button>
       {open && (
         <>
-          <div className="mt-3 grid grid-cols-1 gap-4 lg:grid-cols-2">
+          <div className="mt-3 grid grid-cols-1 items-start gap-4 lg:grid-cols-2">
             {g.items.map((it) => <GuideCard key={it.title} item={it} accent={g.accent} />)}
           </div>
           {/* 直达入口：跳转到本组对应的设置分区 / 独立页面，消除「看得到找不到」 */}
@@ -366,7 +393,7 @@ function GroupHeader({ g }: { g: GuideGroup }) {
                   to={l.to}
                   className="rounded-full border border-[var(--border)] bg-[var(--card)] px-2.5 py-1 text-xs text-[var(--fg)] transition-colors hover:border-[var(--color-primary)] hover:text-[var(--color-primary)]"
                 >
-                  {l.label} →
+                  {l.label} ›
                 </Link>
               ))}
             </div>
@@ -377,26 +404,88 @@ function GroupHeader({ g }: { g: GuideGroup }) {
   );
 }
 
+/**
+ * 按关键词过滤帮助条目：命中标题、用途或任一步骤说明即保留；组内无命中则整组隐藏。
+ * 空查询返回原结构（保持分组顺序与直达入口）。
+ */
+function filterGroups(query: string): GuideGroup[] {
+  const k = query.trim().toLowerCase();
+  if (!k) return GROUPS;
+  return GROUPS
+    .map((g) => ({
+      ...g,
+      items: g.items.filter((it) => [it.title, it.desc, ...it.steps].some((s) => s.toLowerCase().includes(k))),
+    }))
+    .filter((g) => g.items.length > 0);
+}
+
 export default function Help() {
   const total = GROUPS.reduce((n, g) => n + g.items.length, 0);
+  const [q, setQ] = useState('');
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+
+  const groups = useMemo(() => filterGroups(q), [q]);
+  const searching = q.trim().length > 0;
+  const matchedCount = groups.reduce((n, g) => n + g.items.length, 0);
+  // 「全部收起」状态仅在非搜索时有效：搜索命中必须全部展开，否则结果会被折叠藏起来
+  const allCollapsed = !searching && GROUPS.every((g) => collapsed[g.key]);
+  const toggleAll = () => setCollapsed(allCollapsed ? {} : Object.fromEntries(GROUPS.map((g) => [g.key, true])));
+
   return (
     <div className="space-y-3">
-      {/* 页头横幅 */}
-      <div className="flex items-center justify-between rounded-xl border border-[var(--border)] bg-gradient-to-r from-[#10B981]/10 to-[#1E6FA9]/10 p-4">
-        <div>
-          <h2 className="text-lg font-bold">使用说明</h2>
-          <p className="mt-0.5 text-xs text-muted">覆盖本应用全部 {total} 项功能，点击分组标题可展开 / 收起。</p>
+      {/* 页头：标题 + 合并的搜索与展开控制，避免与设置页搜索栏重复堆叠 */}
+      <div className="rounded-xl border border-[var(--border)] bg-gradient-to-r from-[#10B981]/10 to-[#1E6FA9]/10 p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-bold">使用说明</h2>
+            <p className="mt-0.5 text-xs text-muted">共 {total} 项功能说明，按分组浏览；输入关键词可快速定位具体条目。</p>
+          </div>
+          <button
+            type="button"
+            onClick={toggleAll}
+            className="rounded-lg border border-[var(--border)] bg-[var(--card)] px-3 py-1.5 text-xs text-[var(--fg)] transition-colors hover:border-[var(--color-primary)] hover:text-[var(--color-primary)]"
+          >
+            {allCollapsed ? '全部展开' : '全部收起'}
+          </button>
         </div>
-        <span className="hidden text-2xl sm:block">📘</span>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <Input
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            placeholder="搜索本页功能：如 预算 / 导入 / 对账"
+            className="w-full sm:w-72"
+          />
+          {searching && (
+            <span className="text-xs text-muted">
+              {matchedCount > 0 ? `匹配 ${matchedCount} 项，已自动展开` : '没有匹配的功能'}
+            </span>
+          )}
+        </div>
       </div>
 
-      {GROUPS.map((g) => <GroupHeader key={g.key} g={g} />)}
+      {groups.map((g) => (
+        <GroupHeader
+          key={g.key}
+          g={g}
+          matched={searching}
+          open={searching || !collapsed[g.key]}
+          onToggle={() => setCollapsed((c) => ({ ...c, [g.key]: !c[g.key] }))}
+        />
+      ))}
+
+      {searching && groups.length === 0 && (
+        <p className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-4 text-sm text-muted">
+          没有匹配的功能，试试更短的关键词，例如「预算」「导入」「对账」。
+        </p>
+      )}
 
       {/* 快捷提示 */}
-      <div className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-4 text-sm text-muted">
-        <p className="font-semibold text-[var(--fg)]">快捷提示</p>
-        <p className="mt-1">搜索：顶部 <Kbd>Ctrl/⌘</Kbd> + <Kbd>K</Kbd> 打开命令面板，可快速定位功能 / 分类 / 交易。数据默认仅保存在本机，请及时在「备份与恢复」中导出备份。</p>
-      </div>
+      {!searching && (
+        <div className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-4 text-sm text-muted">
+          <p className="font-semibold text-[var(--fg)]">快捷提示</p>
+          <p className="mt-1">搜索：顶部 <Kbd>Ctrl/⌘</Kbd> + <Kbd>K</Kbd> 打开命令面板，可快速定位功能 / 分类 / 交易。数据默认仅保存在本机，请及时在「备份与恢复」中导出备份。</p>
+        </div>
+      )}
     </div>
   );
 }

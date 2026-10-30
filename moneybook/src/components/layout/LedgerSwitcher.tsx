@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { createPortal } from 'react-dom';
 import { toast } from 'sonner';
 import { useLedgers, useSwitchLedger, useLedgerMutations } from '@/hooks/useLedgers';
 import { useLedgerStore } from '@/stores/useLedgerStore';
@@ -31,35 +32,42 @@ export function LedgerSwitcher() {
         <span className="font-medium">{current?.name || '账本'}</span>
       </button>
 
-      {open && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30" onClick={() => setOpen(false)}>
-          <div className="w-72 rounded-xl border border-[var(--border)] bg-[var(--card)] p-4" onClick={(e) => e.stopPropagation()}>
+      {open && createPortal(
+        // 必须 portal 到 body：该组件挂在 Topbar 的 <header> 内，而 header 带 backdrop-filter，
+        // 会让 position:fixed 的相对包含块退化为 header（高 64px），弹窗被压成一条并被裁切。
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => setOpen(false)}>
+          <div className="w-[min(92vw,360px)] rounded-xl border border-[var(--border)] bg-[var(--card)] p-4 shadow-2xl" onClick={(e) => e.stopPropagation()}>
             <h3 className="mb-3 font-semibold">选择账本</h3>
-            <div className="space-y-1">
+            <div className="max-h-[60vh] space-y-1 overflow-y-auto">
               {ledgers.map((l) => (
                 <button
                   key={l.id}
                   onClick={() => doSwitch(l.id)}
-                  className={`flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm ${l.id === currentId ? '' : 'hover:bg-black/5 dark:hover:bg-white/5'}`}
+                  className={`flex w-full min-w-0 items-center gap-2 rounded-lg px-3 py-2 text-sm ${l.id === currentId ? '' : 'hover:bg-black/5 dark:hover:bg-white/5'}`}
                   style={l.id === currentId ? { background: 'var(--color-primary)', color: 'var(--color-primary-foreground)' } : {}}
                 >
-                  <span>{l.icon}</span>
-                  <span>{l.name}</span>
-                  {l.id === currentId && <span className="ml-auto text-xs">✓</span>}
+                  <span className="shrink-0">{l.icon}</span>
+                  <span className="truncate">{l.name}</span>
+                  {l.id === currentId && <span className="ml-auto shrink-0 text-xs">✓</span>}
                 </button>
               ))}
+              {ledgers.length === 0 && <p className="px-3 py-2 text-xs text-muted">暂无账本，请在「管理账本」中新建。</p>}
             </div>
             <button
-              onClick={() => setManage(true)}
+              onClick={() => { setOpen(false); setManage(true); }}
               className="mt-3 w-full rounded-lg border border-[var(--border)] px-3 py-2 text-sm text-muted hover:bg-black/5 dark:hover:bg-white/5"
             >
               管理账本…
             </button>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
 
-      {manage && <LedgerManager currentId={currentId} onSwitch={doSwitch} onClose={() => setManage(false)} />}
+      {manage && createPortal(
+        <LedgerManager currentId={currentId} onSwitch={doSwitch} onClose={() => setManage(false)} />,
+        document.body
+      )}
     </>
   );
 }
@@ -138,34 +146,48 @@ function LedgerManager({ currentId, onSwitch, onClose }: { currentId: number; on
   return (
     // 该弹窗含未保存输入（新账本名称 / 重命名）：不提供「点遮罩关闭」，
     // 关闭入口仅保留标题栏 ✕ 按钮，避免误点外部导致正在输入的名称丢失。
-    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/30">
-      <div className="w-[400px] rounded-xl border border-[var(--border)] bg-[var(--card)] p-4">
+    <div className="fixed inset-0 z-[60] flex items-center justify-center overflow-y-auto bg-black/40 p-4">
+      <div className="my-auto max-h-[85vh] w-[min(92vw,440px)] overflow-y-auto rounded-xl border border-[var(--border)] bg-[var(--card)] p-4 shadow-2xl">
         <div className="mb-3 flex items-center justify-between">
           <h3 className="font-semibold">账本管理</h3>
-          <button onClick={requestClose} className="text-sm text-muted hover:text-[var(--color-danger)]">✕</button>
+          <button onClick={requestClose} aria-label="关闭" className="rounded-md px-1.5 text-sm text-muted hover:text-[var(--color-danger)]">✕</button>
         </div>
 
         <div className="mb-3 flex items-center gap-2">
-          <Input placeholder="新账本名称" value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') void save(); }} />
-          <Button size="sm" onClick={save}>{editId ? '更新' : '创建'}</Button>
-          {editId && <Button size="sm" variant="ghost" onClick={() => { setEditId(null); setName(''); }}>取消</Button>}
+          {/* 输入框占满剩余宽度、按钮不收缩：否则窄弹窗下「创建」会被挤成「建…」 */}
+          <Input
+            className="min-w-0 flex-1"
+            placeholder="新账本名称"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') void save(); }}
+          />
+          <Button size="sm" className="shrink-0" onClick={save}>{editId ? '更新' : '创建'}</Button>
+          {editId && <Button size="sm" className="shrink-0" variant="ghost" onClick={() => { setEditId(null); setName(''); }}>取消</Button>}
         </div>
 
         <ul className="space-y-1">
           {ledgers.map((l) => (
-            <li key={l.id} className="flex items-center justify-between rounded-lg border border-[var(--border)] px-3 py-2 text-sm">
-              <span className="flex items-center gap-2">
-                <span>{l.icon}</span>{l.name}
-                {l.id === currentId && <span className="text-xs text-[var(--color-primary-fg)]">（当前）</span>}
+            <li
+              key={l.id}
+              className={`flex items-center justify-between gap-2 rounded-lg border px-3 py-2 text-sm ${
+                l.id === currentId ? 'border-[var(--color-primary)]/40 bg-[var(--color-primary)]/5' : 'border-[var(--border)]'
+              }`}
+            >
+              <span className="flex min-w-0 items-center gap-2">
+                <span className="shrink-0">{l.icon}</span>
+                <span className="truncate">{l.name}</span>
+                {l.id === currentId && <span className="shrink-0 text-xs text-muted">（当前）</span>}
               </span>
               {editId !== l.id && (
-                <span className="flex gap-2">
+                <span className="flex shrink-0 gap-2">
                   <button className="text-xs text-[var(--color-primary-fg)] hover:underline" onClick={() => { setEditId(l.id); setName(l.name); }}>重命名</button>
                   <button className="text-xs text-[var(--color-danger)] hover:underline" onClick={() => setDelId(l.id)}>删除</button>
                 </span>
               )}
             </li>
           ))}
+          {ledgers.length === 0 && <li className="px-3 py-2 text-xs text-muted">暂无账本，请在上方输入名称创建。</li>}
         </ul>
 
         <Button size="sm" variant="outline" className="mt-3 w-full" onClick={() => setShowCopy(true)}>
