@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { cn } from '@/lib/utils';
 import { UnsavedCloseDialog } from '@/components/ui/unsaved-guard';
 
@@ -39,7 +40,7 @@ export function Modal({ open, onClose, title, children, wide, side, className, g
   guard?: ModalGuard;
 }) {
   // —— 位置与尺寸状态 ——
-  // pos=null 表示尚未拖动（默认水平居中、顶部 96px）；拖动标题栏后转为像素坐标
+  // pos=null 表示尚未拖动（默认水平 + 垂直居中）；拖动标题栏后转为像素坐标
   const [pos, setPos] = useState<{ x: number; y: number } | null>(null);
   const [size, setSize] = useState<{ w: number; h: number } | null>(null);
   // 未保存守卫确认弹窗的开关
@@ -109,12 +110,15 @@ export function Modal({ open, onClose, title, children, wide, side, className, g
     if (e.button !== 0) return;
     e.preventDefault();
     const w = size?.w ?? baseW;
+    // 未拖动时是 CSS 居中（translate(-50%, -50%)），故基准 Y 必须取「视口中心 - 自身高度一半」，
+    // 不能用固定 96，否则首次拖动的瞬间弹窗会突跳到偏上的位置
+    const h = boxRef.current?.offsetHeight ?? 0;
     dragRef.current = {
       kind: 'move',
       startX: e.clientX,
       startY: e.clientY,
       baseX: pos?.x ?? (window.innerWidth - w) / 2,
-      baseY: pos?.y ?? 96,
+      baseY: pos?.y ?? (window.innerHeight - h) / 2,
       baseW: w,
       baseH: size?.h ?? 0,
     };
@@ -181,22 +185,18 @@ export function Modal({ open, onClose, title, children, wide, side, className, g
     />
   );
 
-  // —— 布局：侧栏贴右侧固定尺寸；普通弹窗 fixed 定位（默认居中，可拖动/缩放） ——
-  if (isSide) {
-    return (
-      <div className="fixed inset-0 z-50 bg-black/40">
-        <div className="flex h-full justify-end">
-          <div className="flex h-full w-[460px] flex-col overflow-hidden rounded-l-xl bg-[var(--card)] shadow-2xl">
-            {header}
-            {body}
-          </div>
+  // —— 布局：侧栏贴右侧固定尺寸；普通弹窗 fixed 定位（默认窗口正中，可拖动/缩放） ——
+  const dialog = isSide ? (
+    <div className="fixed inset-0 z-50 bg-black/40">
+      <div className="flex h-full justify-end">
+        <div className="flex h-full w-[460px] flex-col overflow-hidden rounded-l-xl bg-[var(--card)] shadow-2xl">
+          {header}
+          {body}
         </div>
-        {guardDialog}
       </div>
-    );
-  }
-
-  return (
+      {guardDialog}
+    </div>
+  ) : (
     <div className="fixed inset-0 z-50 bg-black/40">
       <div
         ref={boxRef}
@@ -211,9 +211,10 @@ export function Modal({ open, onClose, title, children, wide, side, className, g
           maxWidth: 'calc(100vw - 32px)',
           maxHeight: size?.h ? 'calc(100vh - 32px)' : '80vh',
           left: pos?.x ?? '50%',
-          top: pos?.y ?? 96,
-          // 默认居中：translateX(-50%) 抵消 left:50%；一旦拖动则使用精确像素坐标
-          transform: pos ? undefined : 'translateX(-50%)',
+          top: pos?.y ?? '50%',
+          // 默认水平 + 垂直居中：translate(-50%, -50%) 抵消 left/top 的 50%；
+          // 一旦拖动则使用精确像素坐标（不再叠加位移）
+          transform: pos ? undefined : 'translate(-50%, -50%)',
         }}
       >
         {header}
@@ -222,6 +223,10 @@ export function Modal({ open, onClose, title, children, wide, side, className, g
       {guardDialog}
     </div>
   );
+
+  // 挂载到 body：调用方祖先若带 transform / backdrop-filter（如顶部栏的毛玻璃），
+  // 会把 fixed 的包含块劫持成该元素，导致弹窗被压扁、裁切、不在窗口中心
+  return createPortal(dialog, document.body);
 }
 
 export function Sheet({ open, onClose, title, children, guard }: {

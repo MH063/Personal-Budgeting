@@ -1,25 +1,28 @@
 import { useState } from 'react';
 import { createPortal } from 'react-dom';
-import { toast } from 'sonner';
-import { useLedgers, useSwitchLedger, useLedgerMutations } from '@/hooks/useLedgers';
+import { useNavigate } from 'react-router-dom';
+import { useLedgers, useSwitchLedger } from '@/hooks/useLedgers';
 import { useLedgerStore } from '@/stores/useLedgerStore';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { CopyLedgerWizard } from './CopyLedgerWizard';
-import { useEscapeClose, UnsavedCloseDialog } from '@/components/ui/unsaved-guard';
 
+/**
+ * 顶栏账本切换器。
+ *
+ * 职责收敛为两件事：切换当前账本、跳转到账本管理页。
+ * 新建 / 重命名 / 删除 / 复制等管理操作统一在「设置 → 账本管理」页面完成，
+ * 避免同一功能在弹窗和页面里维护两套实现。
+ */
 export function LedgerSwitcher() {
   const { data: ledgers = [] } = useLedgers();
   const currentId = useLedgerStore((s) => s.currentId);
   const switchLedger = useSwitchLedger();
   const [open, setOpen] = useState(false);
-  const [manage, setManage] = useState(false);
+  const navigate = useNavigate();
   const current = ledgers.find((l) => l.id === currentId);
 
+  /** 切换账本后收起弹层（缓存清理由 useSwitchLedger 统一完成） */
   async function doSwitch(id: number) {
     await switchLedger(id);
     setOpen(false);
-    setManage(false);
   }
 
   return (
@@ -36,7 +39,10 @@ export function LedgerSwitcher() {
         // 必须 portal 到 body：该组件挂在 Topbar 的 <header> 内，而 header 带 backdrop-filter，
         // 会让 position:fixed 的相对包含块退化为 header（高 64px），弹窗被压成一条并被裁切。
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => setOpen(false)}>
-          <div className="w-[min(92vw,360px)] rounded-xl border border-[var(--border)] bg-[var(--card)] p-4 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+          <div
+            className="w-[min(92vw,360px)] rounded-xl border border-[var(--border)] bg-[var(--card)] p-4 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
             <h3 className="mb-3 font-semibold">选择账本</h3>
             <div className="max-h-[60vh] space-y-1 overflow-y-auto">
               {ledgers.map((l) => (
@@ -51,11 +57,11 @@ export function LedgerSwitcher() {
                   {l.id === currentId && <span className="ml-auto shrink-0 text-xs">✓</span>}
                 </button>
               ))}
-              {ledgers.length === 0 && <p className="px-3 py-2 text-xs text-muted">暂无账本，请在「管理账本」中新建。</p>}
+              {ledgers.length === 0 && <p className="px-3 py-2 text-xs text-muted">暂无账本，请前往账本管理新建。</p>}
             </div>
             <button
-              onClick={() => { setOpen(false); setManage(true); }}
-              className="mt-3 w-full rounded-lg border border-[var(--border)] px-3 py-2 text-sm text-muted hover:bg-black/5 dark:hover:bg-white/5"
+              onClick={() => { setOpen(false); navigate('/settings?tab=ledgers'); }}
+              className="mt-3 w-full rounded-lg border border-[var(--border)] px-3 py-2 text-sm text-[var(--color-primary-fg)] hover:bg-black/5 dark:hover:bg-white/5"
             >
               管理账本…
             </button>
@@ -63,160 +69,6 @@ export function LedgerSwitcher() {
         </div>,
         document.body
       )}
-
-      {manage && createPortal(
-        <LedgerManager currentId={currentId} onSwitch={doSwitch} onClose={() => setManage(false)} />,
-        document.body
-      )}
     </>
-  );
-}
-
-function LedgerManager({ currentId, onSwitch, onClose }: { currentId: number; onSwitch: (id: number) => void; onClose: () => void }) {
-  const { data: ledgers = [] } = useLedgers();
-  const { create, update, remove } = useLedgerMutations();
-  const [name, setName] = useState('');
-  const [editId, setEditId] = useState<number | null>(null);
-  const [delId, setDelId] = useState<number | null>(null);
-  const [showCopy, setShowCopy] = useState(false);
-  // 关闭时若输入框还有内容（新建/重命名未保存），走拦截确认
-  const [closeConfirm, setCloseConfirm] = useState(false);
-
-  // 有未保存输入：输入框内容非空即视为「正在编辑」
-  const dirty = name.trim() !== '';
-
-  /** 保存账本；返回是否成功，供「保存并关闭」判断能否关闭 */
-  async function save(): Promise<boolean> {
-    if (!name.trim()) {
-      toast.error('请输入账本名称');
-      return false;
-    }
-    try {
-      if (editId) {
-        await update.mutateAsync({ id: editId, name });
-        toast.success('已更新');
-      } else {
-        const id = await create.mutateAsync({ name });
-        await onSwitch(id);
-        toast.success('已创建并切换');
-      }
-      setName('');
-      setEditId(null);
-      return true;
-    } catch (e) {
-      toast.error((e as Error).message);
-      return false;
-    }
-  }
-
-  /** 统一关闭入口：✕ 与 Esc 都经此，未保存时先确认 */
-  function requestClose() {
-    if (dirty) {
-      setCloseConfirm(true);
-      return;
-    }
-    onClose();
-  }
-
-  async function saveAndClose() {
-    const ok = await save();
-    if (ok) {
-      setCloseConfirm(false);
-      onClose();
-    }
-  }
-
-  // Esc 键：确认弹窗打开时先收起确认；删除确认/复制向导打开时不抢键盘（由上层自身处理）
-  useEscapeClose(closeConfirm, () => setCloseConfirm(false));
-  useEscapeClose(!closeConfirm && delId == null && !showCopy, requestClose);
-
-  async function doDelete() {
-    if (delId == null) return;
-    try {
-      const next = ledgers.find((l) => l.id !== delId);
-      await remove.mutateAsync(delId);
-      if (delId === currentId && next) await onSwitch(next.id);
-      setDelId(null);
-      toast.success('已删除');
-    } catch (e) {
-      toast.error((e as Error).message);
-    }
-  }
-
-  return (
-    // 该弹窗含未保存输入（新账本名称 / 重命名）：不提供「点遮罩关闭」，
-    // 关闭入口仅保留标题栏 ✕ 按钮，避免误点外部导致正在输入的名称丢失。
-    <div className="fixed inset-0 z-[60] flex items-center justify-center overflow-y-auto bg-black/40 p-4">
-      <div className="my-auto max-h-[85vh] w-[min(92vw,440px)] overflow-y-auto rounded-xl border border-[var(--border)] bg-[var(--card)] p-4 shadow-2xl">
-        <div className="mb-3 flex items-center justify-between">
-          <h3 className="font-semibold">账本管理</h3>
-          <button onClick={requestClose} aria-label="关闭" className="rounded-md px-1.5 text-sm text-muted hover:text-[var(--color-danger)]">✕</button>
-        </div>
-
-        <div className="mb-3 flex items-center gap-2">
-          {/* 输入框占满剩余宽度、按钮不收缩：否则窄弹窗下「创建」会被挤成「建…」 */}
-          <Input
-            className="min-w-0 flex-1"
-            placeholder="新账本名称"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter') void save(); }}
-          />
-          <Button size="sm" className="shrink-0" onClick={save}>{editId ? '更新' : '创建'}</Button>
-          {editId && <Button size="sm" className="shrink-0" variant="ghost" onClick={() => { setEditId(null); setName(''); }}>取消</Button>}
-        </div>
-
-        <ul className="space-y-1">
-          {ledgers.map((l) => (
-            <li
-              key={l.id}
-              className={`flex items-center justify-between gap-2 rounded-lg border px-3 py-2 text-sm ${
-                l.id === currentId ? 'border-[var(--color-primary)]/40 bg-[var(--color-primary)]/5' : 'border-[var(--border)]'
-              }`}
-            >
-              <span className="flex min-w-0 items-center gap-2">
-                <span className="shrink-0">{l.icon}</span>
-                <span className="truncate">{l.name}</span>
-                {l.id === currentId && <span className="shrink-0 text-xs text-muted">（当前）</span>}
-              </span>
-              {editId !== l.id && (
-                <span className="flex shrink-0 gap-2">
-                  <button className="text-xs text-[var(--color-primary-fg)] hover:underline" onClick={() => { setEditId(l.id); setName(l.name); }}>重命名</button>
-                  <button className="text-xs text-[var(--color-danger)] hover:underline" onClick={() => setDelId(l.id)}>删除</button>
-                </span>
-              )}
-            </li>
-          ))}
-          {ledgers.length === 0 && <li className="px-3 py-2 text-xs text-muted">暂无账本，请在上方输入名称创建。</li>}
-        </ul>
-
-        <Button size="sm" variant="outline" className="mt-3 w-full" onClick={() => setShowCopy(true)}>
-          复制账本（迁移向导）…
-        </Button>
-      </div>
-
-      {showCopy && <CopyLedgerWizard onClose={() => setShowCopy(false)} />}
-
-      {/* 未保存拦截：关闭（含 Esc）时若输入框仍有内容，先让用户选择处理方式 */}
-      <UnsavedCloseDialog
-        open={closeConfirm}
-        canSave
-        onContinue={() => setCloseConfirm(false)}
-        onDiscard={() => { setCloseConfirm(false); onClose(); }}
-        onSave={() => void saveAndClose()}
-      />
-
-      {delId != null && (
-        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/30" onClick={() => setDelId(null)}>
-          <div className="w-80 rounded-xl border border-[var(--border)] bg-[var(--card)] p-4" onClick={(e) => e.stopPropagation()}>
-            <p className="mb-4 text-sm">删除该账本将同时删除其账户、交易、借贷与储蓄数据，确定删除？</p>
-            <div className="flex justify-end gap-2">
-              <Button size="sm" variant="ghost" onClick={() => setDelId(null)}>取消</Button>
-              <Button size="sm" variant="danger" onClick={doDelete}>删除</Button>
-            </div>
-          </div>
-        </div>
-      )}
-    </div>
   );
 }

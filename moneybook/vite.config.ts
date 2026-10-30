@@ -1,4 +1,4 @@
-import { defineConfig } from 'vite';
+import { defineConfig, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 import path from 'path';
@@ -6,11 +6,30 @@ import fs from 'node:fs';
 
 // vite.config.ts 以 ESM 加载，用 process.cwd()（运行 vite 的目录即项目根）定位 ort 目录
 const ortDir = path.resolve(process.cwd(), 'ort');
+// 构建产物目录（与 tauri.conf.json 的 frontendDist 保持一致）
+const distDir = path.resolve(process.cwd(), 'dist');
+
+/**
+ * 构建时把根目录的 ort/（onnxruntime-web 的 wasm 运行时）复制到 dist/ort/。
+ * 开发环境由下方 configureServer 中间件按需返回文件，但生产环境没有该中间件，
+ * 而 OCR 引擎把 wasmPaths 固定为 /ort/，缺少这些文件会直接导致「OCR 引擎初始化失败」。
+ */
+function copyOrtRuntime(): Plugin {
+  return {
+    name: 'moneybook-copy-ort-runtime',
+    apply: 'build',
+    closeBundle() {
+      fs.cpSync(ortDir, path.join(distDir, 'ort'), { recursive: true });
+      console.log('[vite] 已复制 onnxruntime wasm 运行时到 dist/ort');
+    },
+  };
+}
 
 export default defineConfig({
   plugins: [
     react(),
     tailwindcss(),
+    copyOrtRuntime(),
   ],
   resolve: {
     alias: { '@': path.resolve(__dirname, './src') },

@@ -13,6 +13,33 @@ export async function listLedgers(): Promise<Ledger[]> {
   return select<Ledger>('SELECT * FROM ledgers ORDER BY id');
 }
 
+/** 账本总览：账本基础信息 + 各维度的数据量统计（账本管理页用） */
+export interface LedgerOverview extends Ledger {
+  account_count: number;
+  tx_count: number;
+  /** 最近一笔流水的记账日期（无流水时为 null） */
+  last_tx_date: string | null;
+  goal_count: number;
+  loan_count: number;
+}
+
+/**
+ * 查询账本总览（含统计）。
+ * 用子查询聚合而非多次往返：账本通常只有个位数，子查询开销可忽略，
+ * 但能保证「一个请求拿到整页所需数据」，避免前端 N 次 IPC 造成列表闪烁。
+ */
+export async function ledgerOverview(): Promise<LedgerOverview[]> {
+  return select<LedgerOverview>(
+    `SELECT l.*,
+       (SELECT COUNT(*) FROM accounts a WHERE a.ledger_id = l.id) AS account_count,
+       (SELECT COUNT(*) FROM transactions t WHERE t.ledger_id = l.id) AS tx_count,
+       (SELECT MAX(t.date) FROM transactions t WHERE t.ledger_id = l.id) AS last_tx_date,
+       (SELECT COUNT(*) FROM savings_goals g WHERE g.ledger_id = l.id) AS goal_count,
+       (SELECT COUNT(*) FROM loans o WHERE o.ledger_id = l.id) AS loan_count
+     FROM ledgers l ORDER BY l.id`
+  );
+}
+
 /** 新建账本 */
 export async function createLedger(name: string, icon?: string, color?: string): Promise<number> {
   const rs = await execute(

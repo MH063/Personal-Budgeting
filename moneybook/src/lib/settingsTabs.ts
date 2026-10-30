@@ -5,6 +5,7 @@
 // -----------------------------------------------------------------------------
 
 export const SETTINGS_TABS = [
+  { key: 'ledgers', label: '账本管理', icon: '📒' },
   { key: 'category', label: '分类管理', icon: '🏷️' },
   { key: 'account', label: '账户管理', icon: '👛' },
   { key: 'tag', label: '标签管理', icon: '#️⃣' },
@@ -30,7 +31,7 @@ export const DEFAULT_SETTINGS_TAB: SettingsTabKey = 'category';
 /** 设置页一级分组配置（页面导航与搜索共用，避免分组定义散落在页面里） */
 export const SETTINGS_GROUPS: { title: string; icon: string; desc: string; keys: SettingsTabKey[] }[] = [
   { title: '分类与标签', icon: '🏷️', desc: '分类与标签的增删改', keys: ['category', 'tag'] },
-  { title: '账户与模板', icon: '👛', desc: '账户管理、常用交易模板', keys: ['account', 'templates'] },
+  { title: '账户与模板', icon: '👛', desc: '账本切换、账户管理、常用交易模板', keys: ['ledgers', 'account', 'templates'] },
   { title: '预算与周期', icon: '📊', desc: '预算、周期性记账', keys: ['budget', 'recurring'] },
   { title: '智能规则与 AI', icon: '🧠', desc: '全部规则、参考知识与 AI 助手', keys: ['rules', 'ai'] },
   { title: '数据备份与导出', icon: '💾', desc: '账目导入、报表导出与 JSON 导出、数据库备份', keys: ['import', 'export', 'backup'] },
@@ -39,6 +40,7 @@ export const SETTINGS_GROUPS: { title: string; icon: string; desc: string; keys:
 
 /** 搜索别名：用户常用说法与英文 key（命中后即可定位到对应子页） */
 const TAB_ALIASES: Record<SettingsTabKey, string[]> = {
+  ledgers: ['账本', '多账本', '切换账本', 'ledger', 'ledgers'],
   category: ['分类', '类别', '科目', 'category'],
   account: ['账户', '银行卡', '余额', 'account'],
   tag: ['标签', 'tag'],

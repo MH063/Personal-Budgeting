@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import CategoryManage from './CategoryManage';
+import LedgerManage from './LedgerManage';
 import TagManage from './TagManage';
 import BudgetManage from './BudgetManage';
 import RecurringManage from './RecurringManage';
@@ -28,6 +29,7 @@ const keyLabel = (k: string) => SETTINGS_TABS.find((t) => t.key === k)?.label ??
 
 function Rendered({ k }: { k: string }) {
   switch (k) {
+    case 'ledgers': return <LedgerManage />;
     case 'category': return <CategoryManage />;
     case 'tag': return <TagManage />;
     case 'account': return <AccountManage />;

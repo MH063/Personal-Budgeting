@@ -1,9 +1,14 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { listLedgers, createLedger, updateLedger, deleteLedger, getActiveLedger, setActiveLedger, copyLedgerData } from '@/api/ledgers';
+import { listLedgers, ledgerOverview, createLedger, updateLedger, deleteLedger, getActiveLedger, setActiveLedger, copyLedgerData } from '@/api/ledgers';
 import type { CopyReport } from '@/api/ledgers';
 
 export function useLedgers() {
   return useQuery({ queryKey: ['ledgers'], queryFn: listLedgers });
+}
+
+/** 账本总览（带账户/流水/储蓄/借贷计数），供账本管理页使用 */
+export function useLedgerOverview() {
+  return useQuery({ queryKey: ['ledgerOverview'], queryFn: ledgerOverview });
 }
 
 export function useActiveLedger() {
@@ -12,7 +17,11 @@ export function useActiveLedger() {
 
 export function useLedgerMutations() {
   const qc = useQueryClient();
-  const inval = () => qc.invalidateQueries({ queryKey: ['ledgers'] });
+  const inval = () => {
+    qc.invalidateQueries({ queryKey: ['ledgers'] });
+    // 账本管理页的统计会随增删改名变化，必须一起刷新
+    qc.invalidateQueries({ queryKey: ['ledgerOverview'] });
+  };
   const create = useMutation({ mutationFn: ({ name, icon, color }: { name: string; icon?: string; color?: string }) => createLedger(name, icon, color), onSuccess: inval });
   const update = useMutation({ mutationFn: ({ id, name, icon, color }: { id: number; name: string; icon?: string; color?: string }) => updateLedger(id, name, icon, color), onSuccess: inval });
   const remove = useMutation({ mutationFn: deleteLedger, onSuccess: inval });
