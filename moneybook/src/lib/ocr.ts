@@ -365,9 +365,66 @@ const DEFAULT_PPOCR_OPTIONS: Required<PaddleOcrOptions> = {
  *  （wasm/模型下载每次数秒，若为确定性失败反复重试只会白耗）。 */
 export const ENGINE_RETRY_BACKOFF_MS = 10_000;
 
+/**
+ * 选择 wasm 运行时来源。
+ * - 开发环境：必须显式指向 /ort/（Vite dev 会把 node_modules 里的 .wasm 改写成 ?import 模块，
+ *   只有 configureServer 中间件能把真实字节吐给 onnxruntime）。
+ * - 生产环境：优先不指定 wasmPaths，让 onnxruntime 使用「构建时内联的 jsep 版 wasm」
+ *   （Vite 已把 dist/assets/ort-wasm-simd-threaded.jsep-*.wasm 作为静态资源打包）。
+ *   一旦显式指定 wasmPaths，ORT 会禁用内联 glue，改为在运行时动态 import /ort/*.mjs；
+ *   这条链路在 WebView2 自定义协议下不稳定，失败时只会抛出
+ *   "Can't create a session. ERROR_CODE: 0, ERROR_MESSAGE:"（原因为空，无法定位）。
+ * - useFallback=true 表示重试时回退到 /ort/ 外部运行时。
+ */
+function wasmPathOption(useOrtDir: boolean): Pick<OcrEngineOptions, 'wasmPaths'> {
+  if (IS_DEV || useOrtDir) return { wasmPaths: ORT_WASM_ROOT };
+  return {};
+}
+
+/**
+ * 预取 ONNX 模型字节，把「资源缺失/被回退页劫持」提前暴露成可读错误。
+ * 直接把 URL 交给 onnxruntime 时，若请求被 SPA 回退成 HTML，ORT 只会抛出
+ * "Can't create a session. ERROR_CODE: 0"，没有具体原因，用户与日志都无法定位。
+ * ONNX 是 protobuf，文件首字节固定为 0x08（ir_version 字段），可据此识别异常内容。
+ */
+async function fetchModelBytes(url: string, name: string): Promise<Uint8Array> {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`OCR 模型加载失败：${name}（HTTP ${res.status}）`);
+  const bytes = new Uint8Array(await res.arrayBuffer());
+  if (bytes.byteLength < 64 * 1024 || bytes[0] !== 0x08) {
+    throw new Error(`OCR 模型文件异常：${name}（${bytes.byteLength} 字节），请重新安装应用`);
+  }
+  if (IS_DEV) console.log(`[ocr] 已加载 ${name}（${(bytes.byteLength / 1024 / 1024).toFixed(1)} MB）`);
+  return bytes;
+}
+
+/**
+ * 创建引擎 Worker。生产环境先尝试内联 wasm，失败后再回退到 /ort/ 外部运行时；
+ * 开发环境直接用 /ort/。每次失败都会 terminate 半初始化的 worker，回收线程与内存。
+ */
+async function createEngineWorker(opts: OcrEngineOptions): Promise<OcrEngineWorker> {
+  const attempts = IS_DEV ? [true] : [false, true];
+  let lastErr: unknown = null;
+  for (const useOrtDir of attempts) {
+    // 用原生 new URL 让 Vite 打包 @ocr-web/core 的 worker 入口为独立 Worker。
+    // 注意 specifier 是 exports 暴露的 "./worker"（对应 dist/worker.js），非原始文件路径。
+    const worker = new Worker(new URL('@ocr-web/core/worker', import.meta.url), { type: 'module' });
+    try {
+      return await OcrEngineWorker.create({ worker, ...opts, ...wasmPathOption(useOrtDir) });
+    } catch (e) {
+      lastErr = e;
+      worker.terminate();
+      if (IS_DEV) console.warn(`[ocr] wasm 运行时（${useOrtDir ? '/ort/' : '内联'}）初始化失败，尝试下一种…`, e);
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+}
+
 /** 惰性单例：首次识别才加载引擎（含三模型 + 字典），后续复用，避免反复初始化慢 */
 let enginePromise: Promise<OcrEngineWorker> | null = null;
 let engineFailAt = 0;
+/** 最近一次初始化失败的可读原因：熔断期内重试时直接把它抛给用户，避免只剩一句“请稍后再试” */
+let engineFailMsg = '';
 
 /**
  * 创建（复用的）PP-OCR 引擎单例，运行在后台 Web Worker，避免主线程被密集推理阻塞。
@@ -376,36 +433,37 @@ let engineFailAt = 0;
 export async function getPaddleEngine(): Promise<OcrEngineWorker> {
   // 失败熔断：短时间内不重试，直接拒绝并抛出可读信息，避免每次识别都重载失败（#19）
   if (!enginePromise && engineFailAt && Date.now() - engineFailAt < ENGINE_RETRY_BACKOFF_MS) {
-    throw new Error('OCR 引擎初始化刚失败，请稍后再试');
+    throw new Error(engineFailMsg ? `OCR 引擎初始化失败：${engineFailMsg}` : 'OCR 引擎初始化刚失败，请稍后再试');
   }
   if (!enginePromise) {
     // 首次建引擎时顺带做一次 Tauri 端模型哈希校验（尽力而为，失败不阻断）
     void verifyOcrModelsInTauri();
-    const opts: OcrEngineOptions = {
-      models: {
-        detection: PPOCR_DET_URL,
-        recognition: PPOCR_REC_URL,
-        classification: PPOCR_CLS_URL,
-      },
-      dictionary: PPOCR_DICT_URL,
-      runtime: 'wasm',
-      wasmPaths: ORT_WASM_ROOT,
-      // 多线程需 crossOriginIsolated（SharedArrayBuffer）。仅 Tauri 生产（tauri:// 同源）可用；
-      // 浏览器 dev 用局域网 IP http 访问时不可信源，多线程不可用。这里按环境显式降为 1，
-      // 既避免 onnxruntime 无谓地申请 4 线程又拿不到（控制台不再刷多线程警告），也保证功能可用。
-      numThreads: typeof crossOriginIsolated !== 'undefined' && crossOriginIsolated ? 4 : 1,
-    };
-    if (IS_DEV) console.log(`[ocr] 初始化 PP-OCR 引擎（后台 Worker；${
-      typeof crossOriginIsolated !== 'undefined' && crossOriginIsolated ? '多线程 x4' : '单线程（浏览器非隔离源，Tauri 桌面自动启用多线程）'
-    }）…`);
+    if (IS_DEV) console.log('[ocr] 初始化 PP-OCR 引擎（后台 Worker，单线程）…');
     enginePromise = (async () => {
-      // 用原生 new URL 让 Vite 打包 @ocr-web/core 的 worker 入口为独立 Worker。
-      // 注意 specifier 是 exports 暴露的 "./worker"（对应 dist/worker.js），非原始文件路径。
-      const worker = new Worker(new URL('@ocr-web/core/worker', import.meta.url), { type: 'module' });
-      return OcrEngineWorker.create({ worker, ...opts });
+      // 先自行拉取模型字节：既能提前拦截“拿到 HTML/空文件”的异常，也让失败信息可读
+      const models = {
+        detection: await fetchModelBytes(PPOCR_DET_URL, '检测模型'),
+        recognition: await fetchModelBytes(PPOCR_REC_URL, '识别模型'),
+        classification: await fetchModelBytes(PPOCR_CLS_URL, '方向分类模型'),
+      };
+      const opts: OcrEngineOptions = {
+        models,
+        dictionary: PPOCR_DICT_URL,
+        runtime: 'wasm',
+        // 固定单线程：多线程依赖 SharedArrayBuffer 与嵌套 worker，在 WebView2 自定义协议下
+        // 容易导致会话创建失败（ERROR_CODE: 0）；单张票据识别用单线程更稳，速度也可接受。
+        numThreads: 1,
+      };
+      try {
+        return await createEngineWorker(opts);
+      } catch (e) {
+        // 把底层晦涩的 wasm/ORT 错误补上阶段信息，便于用户反馈与控制台定位
+        throw new Error(`推理引擎创建失败：${(e as Error)?.message || e}`);
+      }
     })().catch((e) => {
       console.error('[ocr] PP-OCR 引擎初始化失败', e);
       engineFailAt = Date.now(); // 记录失败时间用于熔断退避
+      engineFailMsg = (e as Error)?.message ?? String(e);
       enginePromise = null;       // 冷却期过后允许再次重试
       throw e;
     });
@@ -476,14 +534,11 @@ export async function getServerRecEngine(): Promise<OcrEngineWorker> {
       },
       dictionary: PPOCR_DICT_URL,
       runtime: 'wasm',
-      wasmPaths: ORT_WASM_ROOT,
-      numThreads: 4,
+      // 与主引擎一致固定单线程，避免 WebView2 下的多线程会话创建失败
+      numThreads: 1,
     };
     if (IS_DEV) console.log('[ocr] 初始化 server rec 复核引擎（后台 Worker，本地加载 server 版 rec 模型）…');
-    const engine = await (async () => {
-      const worker = new Worker(new URL('@ocr-web/core/worker', import.meta.url), { type: 'module' });
-      return OcrEngineWorker.create({ worker, ...opts });
-    })().catch((e) => {
+    const engine = await createEngineWorker(opts).catch((e) => {
       console.error('[ocr] server rec 复核引擎初始化失败', e);
       serverEngineFailAt = Date.now(); // 记录失败时间用于熔断退避
       throw e;
