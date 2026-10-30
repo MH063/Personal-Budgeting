@@ -14,6 +14,7 @@ import { useTransactionList } from '@/hooks/useTransactions';
 import { useReconciliation, useReconItems, useReconDiff, exportReconDiff, parseBankStatement, importBankRows, type ReconDiffRow } from '@/hooks/useReconciliation';
 import { listMatches } from '@/api/reconciliation';
 import type { BankRow } from '@/api/reconciliation';
+import { buildBalanceAdjustment } from '@/api/reconciliation';
 import { explainReconDiff } from '@/api/llm';
 import { formatDate, formatMoney } from '@/lib/format';
 import type { TransactionDetail } from '@/api/transactions';
@@ -210,7 +211,7 @@ export default function ReconcilePage() {
 // 匹配视图：导入银行流水 → 自动匹配 → 手动配对 → 完成对账
 function MatchView({ batch, onBack, onLocked }: { batch: ReconRow; onBack: () => void; onLocked: () => void }) {
   const fileRef = useRef<HTMLInputElement>(null);
-  const { auto, manual, lock } = useReconciliation();
+  const { auto, manual, lock, ignore, createTx } = useReconciliation();
   const { data: items = [], isLoading } = useReconItems(batch.id);
   // 本地未匹配默认分页 20 条/页；翻页会触发 useReconDiff 按 page 重新拉取
   const [diffPage, setDiffPage] = useState(1);
@@ -321,6 +322,32 @@ function MatchView({ batch, onBack, onLocked }: { batch: ReconRow; onBack: () =>
     setManualItemId(null);
   }
 
+  /**
+   * 忽略某条银行流水：标记后不再计入差异、不阻断锁定（用于确认「银行多记/无需处理」的行）。
+   * 只改对账明细状态，不生成交易、不动账户余额。
+   */
+  async function onIgnore(itemId: number) {
+    try {
+      await ignore.mutateAsync({ recId: batch.id, itemId });
+      toast.success('已忽略该银行流水');
+    } catch (error) {
+      toast.error((error as Error).message);
+    }
+  }
+
+  /**
+   * 由银行流水一键补记本地交易并配对：用于「银行已发生、本地漏记」的行。
+   * 会真实新增一笔收入/支出（账户余额随之变动），因此需要用户主动点击确认。
+   */
+  async function onCreateTx(itemId: number) {
+    try {
+      await createTx.mutateAsync({ recId: batch.id, itemId });
+      toast.success('已补记本地交易并完成配对');
+    } catch (error) {
+      toast.error((error as Error).message);
+    }
+  }
+
   async function onLock() {
     if (!endBalance || Number.isNaN(Number(endBalance))) { toast.error('请填写银行期末余额'); return; }
     try {
@@ -336,6 +363,16 @@ function MatchView({ batch, onBack, onLocked }: { batch: ReconRow; onBack: () =>
 
   const unmatched = items.filter((i) => i.match_kind === 'unmatched_bank');
   const matched = items.filter((i) => ['auto', 'manual', 'split'].includes(i.match_kind));
+
+  // 余额调节表：银行对账单余额与推算余额各自调整到可比口径后应相等
+  const adjustment = buildBalanceAdjustment({
+    bankEndBalance: endBalance && !Number.isNaN(Number(endBalance)) ? Number(endBalance) : null,
+    calcBalance: diff?.calcBalance ?? null,
+    localNotBankNet: diff?.localUnmatchedNet ?? 0,
+    localNotBankCount: diff?.localUnmatchedTotal ?? 0,
+    bankUnmatched: diff?.bankUnmatched ?? [],
+    amountMismatch: diff?.amountMismatch ?? [],
+  });
 
   // 本地未匹配分页总页数
   const localTotal = diff?.localUnmatchedTotal ?? 0;
@@ -416,6 +453,22 @@ function MatchView({ batch, onBack, onLocked }: { batch: ReconRow; onBack: () =>
                     <div className="mt-1 flex items-center gap-2 text-xs text-muted">
                       <span>{b ? b.date : ''}</span>
                       <button className="hover:underline" style={{ color: 'var(--color-primary)' }} onClick={() => setManualItemId(m.id)}>手动配对</button>
+                      {/* 闭环一：银行有、本地漏记 → 一键补记一笔本地交易并配对 */}
+                      <button
+                        className="hover:underline"
+                        style={{ color: '#10B981' }}
+                        disabled={createTx.isPending}
+                        title="按该银行流水补记一笔本地收入/支出（会改变账户余额）"
+                        onClick={() => onCreateTx(m.id)}
+                      >补记流水</button>
+                      {/* 闭环二：确认无需处理 → 忽略，不再阻断锁定 */}
+                      <button
+                        className="hover:underline"
+                        style={{ color: '#8B8B96' }}
+                        disabled={ignore.isPending}
+                        title="不计入差异、不生成交易，仅从待处理中移除"
+                        onClick={() => onIgnore(m.id)}
+                      >忽略</button>
                     </div>
                     {manualItemId === m.id && (
                       <div className="mt-2 border-t border-[var(--border)] pt-2">
@@ -482,6 +535,51 @@ function MatchView({ batch, onBack, onLocked }: { batch: ReconRow; onBack: () =>
           )}
         </div>
       )}
+
+      {/* 余额调节表：两侧各自调整后应相等，差额即尚未解释的差异 */}
+      <div className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-5">
+        <h3 className="mb-3 flex items-center gap-1.5 font-semibold">
+          余额调节表
+          <Hint text="银行对账单余额＋本地已记但银行未记的净额，与本地推算余额＋银行已记但本地未记的净额，两者应相等；差额为 0 才说明账实相符。" />
+        </h3>
+        {adjustment.bankStatement == null ? (
+          <p className="text-sm text-muted">填写下方「银行期末余额」后即可生成余额调节表。</p>
+        ) : (
+          <div className="grid gap-4 lg:grid-cols-2">
+            <div className="space-y-1.5 text-sm">
+              <div className="text-xs font-medium text-muted">银行侧</div>
+              <div className="flex justify-between"><span className="text-muted">银行对账单余额</span><span>{formatMoney(adjustment.bankStatement)}</span></div>
+              <div className="flex justify-between">
+                <span className="text-muted">加：本地已记·银行未记（{adjustment.localNotBankCount} 笔）</span>
+                <span className={adjustment.localNotBankNet < 0 ? 'text-[var(--color-danger)]' : ''}>{adjustment.localNotBankNet >= 0 ? '+' : ''}{formatMoney(adjustment.localNotBankNet)}</span>
+              </div>
+              <div className="flex justify-between border-t border-[var(--border)] pt-1.5 font-semibold">
+                <span>调整后银行余额</span><span>{adjustment.adjustedBank != null ? formatMoney(adjustment.adjustedBank) : '-'}</span>
+              </div>
+            </div>
+            <div className="space-y-1.5 text-sm">
+              <div className="text-xs font-medium text-muted">本地侧</div>
+              <div className="flex justify-between"><span className="text-muted">本地推算余额</span><span>{adjustment.calcBalance != null ? formatMoney(adjustment.calcBalance) : '-'}</span></div>
+              <div className="flex justify-between">
+                <span className="text-muted">加：银行已记·本地未记（{adjustment.bankNotLocalCount} 笔）</span>
+                <span className={adjustment.bankNotLocalNet < 0 ? 'text-[var(--color-danger)]' : ''}>{adjustment.bankNotLocalNet >= 0 ? '+' : ''}{formatMoney(adjustment.bankNotLocalNet)}</span>
+              </div>
+              <div className="flex justify-between border-t border-[var(--border)] pt-1.5 font-semibold">
+                <span>调整后本地余额</span><span>{adjustment.adjustedLocal != null ? formatMoney(adjustment.adjustedLocal) : '-'}</span>
+              </div>
+            </div>
+            <div className="lg:col-span-2 text-sm">
+              {adjustment.balanced ? (
+                <span className="font-medium" style={{ color: 'var(--color-success)' }}>调整后差额 0，账实相符 ✅</span>
+              ) : (
+                <span className="font-medium" style={{ color: 'var(--color-danger)' }}>
+                  调整后仍有差额 {adjustment.difference != null ? formatMoney(adjustment.difference) : '—'}，请继续核对未匹配项或检查期初余额。
+                </span>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
 
       {/* 步骤三：完成对账 */}
       <div className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-5">

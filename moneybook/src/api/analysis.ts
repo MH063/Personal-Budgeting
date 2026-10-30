@@ -268,7 +268,7 @@ export async function analyzeLocally(
   const budgetOverCount = budgetOver.length;
   const budgetAlertCount = budgetAlert.length;
 
-  // 健康度评分（与 getInsights 口径保持一致，供本地建议使用）
+  // 健康度评分（与 getInsights 同口径，满分 100 = 储蓄率 40 + 预算执行 30 + 结构与波动 30）
   let sScore = 0;
   if (savingsRate >= 0.3) sScore = 40;
   else if (savingsRate >= 0.2) sScore = 32;
@@ -277,7 +277,15 @@ export async function analyzeLocally(
   else sScore = 0;
   const overPenalty = budgetOverCount === 0 ? 30 : budgetOverCount === 1 ? 20 : Math.max(8, 30 - budgetOverCount * 10);
   const bScore = budgets.length === 0 ? 22 : overPenalty;
-  const score = Math.round(sScore + bScore);
+  // 结构与波动分（30 分基准）：支出环比突增、支出去向过度集中都是风险信号，按档扣分
+  let stScore = 30;
+  if (expMomPct !== null && expMomPct >= 50) stScore -= 15;
+  else if (expMomPct !== null && expMomPct >= 30) stScore -= 10;
+  if (top1Ratio >= 60) stScore -= 15;
+  else if (top1Ratio >= 40) stScore -= 10;
+  stScore = Math.max(0, stScore);
+  // 三项合计上限 100，分档阈值（80/60/40）才可达，避免「优秀」永远评不出来（历史缺陷：满分只有 70）
+  const score = Math.round(sScore + bScore + stScore);
   const scoreLabel = score >= 80 ? '优秀' : score >= 60 ? '良好' : score >= 40 ? '需关注' : '风险';
 
   // ---------------- 本地建议（规则化、按优先级） ----------------

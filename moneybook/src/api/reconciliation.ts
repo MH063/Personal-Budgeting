@@ -8,7 +8,7 @@ import dayjs from 'dayjs';
 import { execute, runInTransaction, select } from './db';
 import { currentLedgerId } from '@/lib/ledger';
 import { roundMoney } from '@/lib/money';
-import { listTransactionsDetailed } from './transactions';
+import { createTransaction } from './transactions';
 
 export type ReconcileStatus = 'draft' | 'locked';
 
@@ -169,46 +169,141 @@ export async function importBankRows(recId: number, rows: BankRow[]): Promise<nu
   });
 }
 
+/** 银行流水方向：净额为正表示钱进入对账账户（转入），为负表示转出；零变动返回 none */
+export function bankDirection(bank: Pick<BankRow, 'income' | 'expense'>): 'in' | 'out' | 'none' {
+  const net = roundMoney((Number(bank.income) || 0) - (Number(bank.expense) || 0));
+  if (Math.abs(net) <= 0.001) return 'none';
+  return net > 0 ? 'in' : 'out';
+}
+
+/**
+ * 本地交易相对「某个对账账户」的资金方向。
+ * 收入/借入/收回借款 → 进账；支出/借出/还款 → 出账；
+ * 转账按账户两端判定：钱转入该账户 → in，转出 → out。
+ * 历史缺陷：此前转账一律判为 'transfer'，与银行侧的 in/out 永不相等，
+ * 导致「银行卡→支付宝」这类转账流水永远无法自动匹配、只能人工配对。
+ */
+export function txDirectionForAccount(
+  tx: { type: string; account_id: number; to_account_id: number | null },
+  accountId: number
+): 'in' | 'out' | 'none' {
+  if (['income', 'borrow', 'repay_in'].includes(tx.type)) return 'in';
+  if (['expense', 'lend', 'repay_out'].includes(tx.type)) return 'out';
+  if (tx.type === 'transfer') {
+    if (tx.to_account_id === accountId) return 'in';
+    if (tx.account_id === accountId) return 'out';
+  }
+  return 'none';
+}
+
+/** 把数组按固定大小分块（用于参数化 IN 查询分批，避免超过 SQLite 变量数量上限） */
+export function chunkArray<T>(arr: T[], size: number): T[][] {
+  if (!arr.length) return [];
+  if (size <= 0) return [arr];
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+
+/** 自动匹配用到的本地交易精简字段（只取匹配所需，避免拉回整行与关联表） */
+interface MatchCandidate {
+  id: number;
+  type: string;
+  amount: number;
+  date: string;
+  note: string | null;
+  account_id: number;
+  to_account_id: number | null;
+  reconciliation_id: number | null;
+}
+
+/**
+ * 拉取「可能匹配」的本地交易：仅限对账账户（含转出/转入两端）、批次期间内，
+ * 且金额落在银行流水金额集合内的行。
+ * 金额用 ROUND(amount,2) IN (...) 分批预筛，避免把期间内全部交易（含大量无关金额）拉回内存。
+ */
+async function listMatchCandidates(rec: Reconciliation, bankRows: BankRow[]): Promise<MatchCandidate[]> {
+  const amounts = [...new Set(
+    bankRows
+      .map((b) => Math.abs(roundMoney((Number(b.income) || 0) - (Number(b.expense) || 0))))
+      .filter((a) => a > 0.001)
+      .map((a) => Number(a.toFixed(2)))
+  )];
+  if (!amounts.length) return [];
+
+  const bankDates = bankRows.map((b) => b.date).filter(Boolean).sort();
+  const from = rec.period_start || bankDates[0] || null;
+  const to = rec.period_end || bankDates[bankDates.length - 1] || null;
+
+  const conds = ['t.ledger_id = $1', '(t.account_id = $2 OR t.to_account_id = $2)'];
+  const params: unknown[] = [currentLedgerId(), rec.account_id];
+  if (from) { params.push(from); conds.push(`t.date >= $${params.length}`); }
+  if (to) { params.push(to); conds.push(`t.date <= $${params.length}`); }
+
+  const out: MatchCandidate[] = [];
+  // 每批 400 个金额：远低于 SQLite 默认参数上限，同时对账单行数通常也在数百量级
+  for (const chunk of chunkArray(amounts, 400)) {
+    const ph = chunk.map((_, i) => `$${params.length + i + 1}`).join(',');
+    const rows = await select<MatchCandidate>(
+      `SELECT t.id, t.type, t.amount, t.date, t.note, t.account_id, t.to_account_id, t.reconciliation_id
+       FROM transactions t
+       WHERE ${conds.join(' AND ')} AND ROUND(t.amount, 2) IN (${ph})
+       ORDER BY t.date, t.id`,
+      [...params, ...chunk]
+    );
+    out.push(...rows);
+  }
+  return out;
+}
+
 /** 自动匹配：金额相同 + 日期 ±3 天内 + 备注去除空白后模糊相似（或金额相同且唯一候选） */
 export async function matchAuto(recId: number): Promise<{ matched: number; skipped: number }> {
   const [rec] = await select<Reconciliation>(`SELECT * FROM reconciliations WHERE id = $1 AND ledger_id = $2`, [recId, currentLedgerId()]);
   if (!rec) throw new Error('对账批次不存在');
 
-  // 候选本地交易：该账户在期间内、未被其他批次锁定
-  const localTxs = await listTransactionsDetailed({
-    accountId: rec.account_id,
-    from: rec.period_start ?? undefined,
-    to: rec.period_end ?? undefined,
-    limit: 100000,
-  });
-  const pool = localTxs.filter((t) => t.reconciliation_id == null || t.reconciliation_id === recId);
   const bankItems = await select<ReconItem>(
     `SELECT * FROM reconciliation_items WHERE reconciliation_id = $1 AND match_kind = 'unmatched_bank' ORDER BY id`,
     [recId]
   );
+  // 解析银行行；坏行（JSON 损坏）直接跳过，不阻断整批匹配（零金额行保留，最终计为 skipped）
+  const bankRows: Array<{ item: ReconItem; bank: BankRow }> = [];
+  for (const bi of bankItems) {
+    try {
+      bankRows.push({ item: bi, bank: JSON.parse(bi.bank_row) as BankRow });
+    } catch {
+      continue;
+    }
+  }
+
+  // 本批次已被占用的本地交易：一笔本地交易只能对应一条银行流水，
+  // 否则重复点「自动匹配」时，同金额的另一条银行行会再次抢走已配对的交易
+  const usedRows = await select<{ transaction_id: number }>(
+    `SELECT transaction_id FROM reconciliation_items WHERE reconciliation_id = $1 AND transaction_id IS NOT NULL`,
+    [recId]
+  );
+  const usedTxIds = new Set(usedRows.map((r) => r.transaction_id));
+
+  // 候选本地交易：该账户在期间内、未被其他批次占用
+  const pool = (await listMatchCandidates(rec, bankRows.map((b) => b.bank)))
+    .filter((t) => (t.reconciliation_id == null || t.reconciliation_id === recId) && !usedTxIds.has(t.id));
 
   let matched = 0;
   let skipped = 0;
   await runInTransaction(async () => {
-    for (const bi of bankItems) {
-      const bank = JSON.parse(bi.bank_row) as BankRow;
-      const bankAmt = Math.abs(bank.income - bank.expense);
-      const dir = bank.income > 0 ? 'in' : bank.expense > 0 ? 'out' : 'none';
-      // 按金额+日期候选
+    for (const { item, bank } of bankRows) {
+      const bankAmt = Math.abs(roundMoney((Number(bank.income) || 0) - (Number(bank.expense) || 0)));
+      const dir = bankDirection(bank);
+      // 按金额 + 方向 + 日期窗筛候选
       const candidates = pool.filter((tx) => {
         if (Math.abs(tx.amount - bankAmt) > 0.001) return false;
-        if (dir === 'none') return false;
-        const txDir = ['income', 'borrow', 'repay_in'].includes(tx.type) ? 'in'
-          : ['expense', 'lend', 'repay_out'].includes(tx.type) ? 'out' : 'transfer';
-        if (txDir !== dir) return false;
-        const diff = Math.abs(dayjs(tx.date).diff(dayjs(bank.date), 'day'));
-        return diff <= 3;
+        if (txDirectionForAccount(tx, rec.account_id) !== dir) return false;
+        return Math.abs(dayjs(tx.date).diff(dayjs(bank.date), 'day')) <= 3;
       });
       // 备注模糊加权：去空白/符号后包含关系
       const norm = (s: string) => s.replace(/[\s\-_（）()/\\]/g, '').toLowerCase();
-      const bk = norm(bank.summary);
+      const bk = norm(bank.summary ?? '');
       const scored = candidates
-        .map((tx) => ({ tx, score: bk && (norm(tx.note).includes(bk) || bk.includes(norm(tx.note))) ? 10 : 0 }))
+        .map((tx) => ({ tx, score: bk && (norm(tx.note ?? '').includes(bk) || bk.includes(norm(tx.note ?? ''))) ? 10 : 0 }))
         .sort((a, b) => {
           if (a.score !== b.score) return b.score - a.score;
           return Math.abs(dayjs(a.tx.date).diff(dayjs(bank.date), 'day')) - Math.abs(dayjs(b.tx.date).diff(dayjs(bank.date), 'day'));
@@ -219,7 +314,7 @@ export async function matchAuto(recId: number): Promise<{ matched: number; skipp
       if (best && unique && !scored.some((s, i) => i > 0 && s.tx.amount === best.tx.amount && s.score === best.score)) {
         await execute(
           `UPDATE reconciliation_items SET transaction_id = $1, match_kind = 'auto', matched_at = datetime('now','localtime') WHERE id = $2`,
-          [best.tx.id, bi.id]
+          [best.tx.id, item.id]
         );
         pool.splice(pool.indexOf(best.tx), 1); // 一笔本地交易只配一次
         matched++;
@@ -237,6 +332,124 @@ export async function matchManual(recId: number, itemId: number, txId: number): 
     `UPDATE reconciliation_items SET transaction_id = $1, match_kind = 'manual', matched_at = datetime('now','localtime') WHERE id = $2 AND reconciliation_id = $3`,
     [txId, itemId, recId]
   );
+}
+
+/**
+ * 忽略某条银行流水（未匹配闭环之一）：标记为 ignored，不再计入待处理差异，也不再阻断锁定。
+ * 仅改对账明细状态，不生成交易、不改变任何账户余额。
+ */
+export async function ignoreBankItem(recId: number, itemId: number): Promise<void> {
+  await execute(
+    `UPDATE reconciliation_items SET match_kind = 'ignored', transaction_id = NULL, matched_at = datetime('now','localtime')
+     WHERE id = $1 AND reconciliation_id = $2`,
+    [itemId, recId]
+  );
+}
+
+/**
+ * 由「银行有·本地无」流水一键生成本地交易并直接配对（未匹配闭环之二）。
+ * 收入/支出方向按银行行净额判定，日期与摘要沿用银行流水；生成后账户余额随之变动（属于补记真实流水）。
+ * @returns 新生成的本地交易 id
+ */
+export async function createTxFromBankItem(recId: number, itemId: number): Promise<number> {
+  return runInTransaction(async () => {
+    const [rec] = await select<Reconciliation>(`SELECT * FROM reconciliations WHERE id = $1 AND ledger_id = $2`, [recId, currentLedgerId()]);
+    if (!rec) throw new Error('对账批次不存在');
+    if (rec.status === 'locked') throw new Error('该批次已锁定，请先解锁再补记流水');
+    const [item] = await select<ReconItem>(
+      `SELECT * FROM reconciliation_items WHERE id = $1 AND reconciliation_id = $2`,
+      [itemId, recId]
+    );
+    if (!item) throw new Error('银行流水行不存在');
+    const bank = JSON.parse(item.bank_row) as BankRow;
+    const net = roundMoney(bank.income - bank.expense);
+    if (Math.abs(net) <= 0.001) throw new Error('该银行流水无金额变动，无法生成交易');
+    const txId = await createTransaction({
+      type: net > 0 ? 'income' : 'expense',
+      amount: Math.abs(net),
+      accountId: rec.account_id,
+      date: bank.date,
+      note: bank.summary || `对账补记（批次 ${recId}）`,
+    });
+    await execute(
+      `UPDATE reconciliation_items SET transaction_id = $1, match_kind = 'manual', matched_at = datetime('now','localtime') WHERE id = $2`,
+      [txId, itemId]
+    );
+    // 补记的交易立即归属本批次：否则未锁定期间它仍是「无归属」状态，
+    // 可能被其他批次的自动匹配抓走，造成同一笔流水被重复对账
+    await execute(`UPDATE transactions SET reconciliation_id = $1 WHERE id = $2`, [recId, txId]);
+    return txId;
+  });
+}
+
+/** 余额调节表：把「银行对账单余额」与「本地推算余额」各自调整到可比口径。
+ *  - 银行侧调整：＋本地已记·银行未记净额（本地已记收入但银行尚未入账，银行余额偏低）
+ *  - 本地侧调整：＋银行已记·本地未记净额（银行已发生但漏记，本地推算余额偏低）
+ *  调整后两值应相等（差额为 0 即账实相符）。
+ */
+export interface BalanceAdjustment {
+  /** 银行对账单期末余额（页面输入的银行余额） */
+  bankStatement: number | null;
+  /** 本地推算余额（期初 + 已匹配银行流水净额） */
+  calcBalance: number | null;
+  /** 本地已记·银行未记净额（正数表示本地多记了收入） */
+  localNotBankNet: number;
+  /** 本地已记·银行未记笔数 */
+  localNotBankCount: number;
+  /** 银行已记·本地未记净额（正数表示银行多入账） */
+  bankNotLocalNet: number;
+  /** 银行已记·本地未记笔数 */
+  bankNotLocalCount: number;
+  /** 调整后银行余额 */
+  adjustedBank: number | null;
+  /** 调整后本地余额 */
+  adjustedLocal: number | null;
+  /** 调整后差额（0 表示账实相符） */
+  difference: number | null;
+  /** 差额是否在容差内 */
+  balanced: boolean;
+}
+
+/** 解析单条银行流水的净额（收入 − 支出），坏行按 0 处理 */
+function bankRowNet(raw: string): number {
+  try {
+    const b = JSON.parse(raw) as BankRow;
+    return roundMoney((Number(b.income) || 0) - (Number(b.expense) || 0));
+  } catch {
+    return 0;
+  }
+}
+
+/** 构造余额调节表（纯函数，便于单元测试） */
+export function buildBalanceAdjustment(input: {
+  bankEndBalance: number | null;
+  calcBalance: number | null;
+  /** 「本地有·银行无」全量净额与笔数（收入为正/支出为负） */
+  localNotBankNet: number;
+  localNotBankCount: number;
+  bankUnmatched: ReconItem[];
+  amountMismatch: ReconItem[];
+}): BalanceAdjustment {
+  const localNotBankNet = roundMoney(input.localNotBankNet);
+  const bankRows = [...input.bankUnmatched, ...input.amountMismatch];
+  const bankNotLocalNet = roundMoney(bankRows.reduce((s, it) => s + bankRowNet(it.bank_row), 0));
+
+  const adjustedBank = input.bankEndBalance == null ? null : roundMoney(input.bankEndBalance + localNotBankNet);
+  const adjustedLocal = input.calcBalance == null ? null : roundMoney(input.calcBalance + bankNotLocalNet);
+  const difference = adjustedBank != null && adjustedLocal != null ? roundMoney(adjustedBank - adjustedLocal) : null;
+
+  return {
+    bankStatement: input.bankEndBalance,
+    calcBalance: input.calcBalance,
+    localNotBankNet,
+    localNotBankCount: input.localNotBankCount,
+    bankNotLocalNet,
+    bankNotLocalCount: bankRows.length,
+    adjustedBank,
+    adjustedLocal,
+    difference,
+    balanced: difference != null && Math.abs(difference) <= 0.001,
+  };
 }
 
 /** 拆分匹配：银行流水金额由多笔本地交易构成（每笔记一条 split；原行保留为 unmatched_bank + amount_mismatch 标记） */
@@ -321,6 +534,20 @@ export function buildLocalUnmatchedCount(rec: Reconciliation): { sql: string; pa
   return { sql: `SELECT COUNT(*) AS n FROM transactions t WHERE ${cond}`, params };
 }
 
+/** 汇总「本地有·银行无」的交易净额（收入为正/支出为负），供余额调节表使用（不受分页影响）。 */
+export function buildLocalUnmatchedSum(rec: Reconciliation): { sql: string; params: unknown[] } {
+  const params: unknown[] = [currentLedgerId(), rec.account_id, rec.id];
+  let cond = `t.ledger_id = $1 AND (t.account_id = $2 OR t.to_account_id = $2)
+              AND t.reconciliation_id IS NULL
+              AND NOT EXISTS (
+                SELECT 1 FROM reconciliation_items ri
+                WHERE ri.reconciliation_id = $3 AND ri.transaction_id = t.id
+              )`;
+  if (rec.period_start) { params.push(rec.period_start); cond += ` AND t.date >= $${params.length}`; }
+  if (rec.period_end) { params.push(rec.period_end); cond += ` AND t.date <= $${params.length}`; }
+  return { sql: `SELECT COALESCE(SUM(t.amount), 0) AS net FROM transactions t WHERE ${cond}`, params };
+}
+
 /** 差异报告：按类别汇总 → 推算余额 → 差异金额。
  *  其中 localUnmatched 为「对账期间内存在的本地交易但银行流水中没有对应记录」，
  *  用于双向核对（避免只盯银行行而漏掉本地误记）。
@@ -332,6 +559,8 @@ export async function reconDiffSummary(
   bankUnmatched: ReconItem[];
   localUnmatched: LocalUnmatchedTx[];
   localUnmatchedTotal: number;
+  /** 「本地有·银行无」全量净额（收入为正/支出为负），供余额调节表使用 */
+  localUnmatchedNet: number;
   amountMismatch: ReconItem[];
   calcBalance: number | null;
 }> {
@@ -343,6 +572,7 @@ export async function reconDiffSummary(
   // 本地有·银行无：对账期间内该账户的本地交易中，未被本批次匹配、且未归属其他批次的
   let localUnmatched: LocalUnmatchedTx[] = [];
   let localUnmatchedTotal = 0;
+  let localUnmatchedNet = 0;
   if (rec) {
     const page = Math.max(1, opts?.page ?? 1);
     const pageSize = Math.max(1, opts?.pageSize ?? 100);
@@ -352,6 +582,10 @@ export async function reconDiffSummary(
     const { sql: cntSql, params: cntParams } = buildLocalUnmatchedCount(rec);
     const cnt = await select<{ n: number }>(cntSql, cntParams);
     localUnmatchedTotal = Number(cnt[0]?.n ?? 0);
+    // 净额必须用全量汇总，不能用当前页数据（否则余额调节表会随翻页变化）
+    const { sql: sumSql, params: sumParams } = buildLocalUnmatchedSum(rec);
+    const sum = await select<{ net: number }>(sumSql, sumParams);
+    localUnmatchedNet = roundMoney(Number(sum[0]?.net ?? 0));
   }
 
   // 推算余额 = 期初 + Σ(匹配银行行净额)（以银行流水的 balance 或净额为准）
@@ -365,6 +599,7 @@ export async function reconDiffSummary(
     bankUnmatched,
     localUnmatched,
     localUnmatchedTotal,
+    localUnmatchedNet,
     amountMismatch,
     calcBalance: rec ? net : null,
   };
@@ -386,10 +621,10 @@ export async function completeReconciliation(recId: number, bankEndBalance: numb
       await execute(`UPDATE transactions SET reconciliation_id = $1 WHERE id = $2`, [recId, m.transaction_id]);
     }
 
-    // 有未配对流水则禁止锁定（差异需处理）
+    // 有未配对流水则禁止锁定（差异需处理）；已忽略的流水视为已闭环，不再阻断
     const pending = await select<{ n: number }>(
       `SELECT COUNT(*) AS n FROM reconciliation_items
-       WHERE reconciliation_id = $1 AND transaction_id IS NULL AND match_kind != 'amount_mismatch'`,
+       WHERE reconciliation_id = $1 AND transaction_id IS NULL AND match_kind NOT IN ('amount_mismatch','ignored')`,
       [recId]
     );
     const pendingN = Number(pending[0]?.n ?? 0);

@@ -8,7 +8,7 @@ import {
   parseCsvText, parseBillAOA, normalizeAccountName, inferAccountType, enforceAccountType, accountsMatch,
   rowFingerprint, buildColumnMap, parseTxType, parseAoaWithMap,
   parseBillDate, detectCreditAccount, extractServiceFee, rowKeyOf,
-  normalizeCategoryName, resolveImportCategory,
+  normalizeCategoryName, resolveImportCategory, mapBillCategoryName,
   resolvePayMethodAccount, detectPoolTarget, dedupeCrossBill,
 } from './import';
 
@@ -132,9 +132,11 @@ describe('resolveImportCategory：分类解析三级收敛', () => {
   });
 
   it('② 词典命中且同名分类仅类型不同 → 复用同名校分类，不重复建', () => {
-    // 收入行分类「工资」命中词典（工资为收入分类）；库中仅有 income 类型 → 复用，不新建 expense 类型
+    // 词典已按行方向过滤（支出行不会再命中收入分类「工资」），此处注入 classify 命中同名分类，
+    // 验证"库中只有 income 类型同名分类 → 复用、不重复建 expense 类型"的兜底机制
     const catMap = new Map([['工资|income', 17]]);
-    expect(resolveImportCategory('工资', 'expense', catMap)).toEqual({ name: '工资', id: 17 });
+    const classify = () => ({ category: '工资', via: '测试注入' });
+    expect(resolveImportCategory('工资', 'expense', catMap, classify)).toEqual({ name: '工资', id: 17 });
   });
 
   it('③ 均未命中 → 返回归一化名与 null（由调用方按 autoCreate 决定新建）', () => {
@@ -151,6 +153,45 @@ describe('resolveImportCategory：分类解析三级收敛', () => {
     expect(catMap.get('餐饮|expense')).toBe(1); // 原始 key 已存在，不新增记忆化 key
     resolveImportCategory('餐饮美食', 'expense', catMap); // 词典命中 → 记忆化 bKey
     expect(catMap.get('餐饮|expense')).toBe(1);
+  });
+});
+
+describe('mapBillCategoryName：平台分类名 → 系统默认分类（精确映射）', () => {
+  it('支付宝常见分类名映射到系统分类，不受关键词顺序影响', () => {
+    expect(mapBillCategoryName('餐饮美食')).toBe('餐饮');
+    expect(mapBillCategoryName('商业服务')).toBe('购物');
+    expect(mapBillCategoryName('充值缴费')).toBe('通讯'); // 旧词典会因「缴费」误落到「居住」
+    expect(mapBillCategoryName('爱车养车')).toBe('交通');
+    expect(mapBillCategoryName('文化休闲')).toBe('娱乐');
+    expect(mapBillCategoryName('家居家装')).toBe('居住');
+    expect(mapBillCategoryName('收入', 'income')).toBe('其他收入');
+  });
+
+  it('交易形态/资金流向占位值视为无分类（不新建分类）', () => {
+    expect(mapBillCategoryName('信用借还')).toBeUndefined();
+    expect(mapBillCategoryName('信用借还(花呗)')).toBeUndefined(); // 括号后缀由归一化剥离
+    expect(mapBillCategoryName('账户存取')).toBeUndefined();
+    expect(mapBillCategoryName('商户消费')).toBeUndefined();
+    expect(mapBillCategoryName('扫二维码付款')).toBeUndefined();
+    expect(mapBillCategoryName('')).toBeUndefined();
+  });
+
+  it('方向校验：支出类分类不套用到收入行，收入类分类不套用到支出行', () => {
+    expect(mapBillCategoryName('商业服务', 'income')).toBeUndefined(); // 收入行交给商户名兜底
+    expect(mapBillCategoryName('收入', 'expense')).toBeUndefined();
+    expect(mapBillCategoryName('餐饮美食', 'transfer')).toBe('餐饮');
+  });
+
+  it('未映射的平台分类名原样保留（交给内置词典兜底）', () => {
+    expect(mapBillCategoryName('其他支出')).toBe('其他支出');
+  });
+});
+
+describe('resolveImportCategory：词典按行方向兜底', () => {
+  it('支出行的「退款」不再被归到收入分类「其他收入」', () => {
+    const map = new Map<string, number>();
+    expect(resolveImportCategory('退款', 'expense', map)).toEqual({ name: '退款', id: null });
+    expect(resolveImportCategory('红包', 'income', map)).toEqual({ name: '奖金', id: null });
   });
 });
 
@@ -223,6 +264,14 @@ describe('parseBillAOA：支付宝真实账单', () => {
     expect(repay!._pending).toBeUndefined(); // 来源卡与信用账户均可识别 → 无需待确认
     expect(res.skippedRows.some((r) => r.amount === 819.55)).toBe(false);
   });
+
+  it('分类列按平台映射收敛到系统默认分类，不再新建平台专有分类', () => {
+    expect(res.rows.find((r) => r.amount === 49)?.category).toBe('购物');   // 商业服务
+    expect(res.rows.find((r) => r.amount === 59.69)?.category).toBe('通讯'); // 充值缴费（旧逻辑误落「居住」）
+    expect(res.rows.find((r) => r.amount === 819.55)?.category).toBeUndefined(); // 信用借还 = 交易形态，不建分类
+    // 收入行不套用支出分类，交给商户/备注关键词兜底（「退款到账」→ 其他收入）
+    expect(res.rows.find((r) => r.amount === 100)?.category).toBe('其他收入');
+  });
 });
 
 describe('parseBillAOA：微信支付真实账单', () => {
@@ -251,6 +300,11 @@ describe('parseBillAOA：微信支付真实账单', () => {
     expect(income).toMatchObject({ type: 'income', amount: 200, payee: '朋友' });
     // 中性交易（100）与已关闭（30）均不写入
     expect(res.rows.map((r) => r.amount)).toEqual([50, 17.8, 200]);
+  });
+
+  it('「交易类型」不再被当作分类写入，分类由商户名/商品说明兜底', () => {
+    expect(res.rows.some((r) => ['商户消费', '转账', '扫二维码付款'].includes(String(r.category)))).toBe(false);
+    expect(res.rows.find((r) => r.amount === 17.8)?.category).toBe('餐饮'); // 「某餐厅」命中内置词典
   });
 });
 

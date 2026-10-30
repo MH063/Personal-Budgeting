@@ -4,7 +4,7 @@ import { currentLedgerId } from '@/lib/ledger';
 import { listAccounts } from '@/api/accounts';
 import { listCategories } from '@/api/categories';
 import { loadUserRules } from './merchantNorm';
-import { categorizeWithRules, classifyBuiltinCategory } from './builtinCategory';
+import { categorizeWithRules, classifyBuiltinCategory, PLATFORM_CATEGORY_MAP, PLATFORM_CATEGORY_IGNORE } from './builtinCategory';
 import { classifyBillDirection, cleanAmount, detectSplitColumns } from './billColumns';
 import { DEFAULT_CATEGORIES } from './factoryReset';
 
@@ -134,7 +134,9 @@ function applyUserCategoryRules(rows: ImportRow[]): void {
     // 匹配文本口径与商户归并一致：收款方 + 备注（覆盖商家名与说明描述）
     const text = [r.payee, r.note].filter(Boolean).join(' ');
     if (!text) continue;
-    const hit = categorizeWithRules(text, rules);
+    // 按行方向过滤内置词典：支出行不落收入分类（反之亦然）
+    const dir = r.type === 'income' || r.type === 'expense' ? r.type : undefined;
+    const hit = categorizeWithRules(text, rules, dir);
     if (hit) {
       r.category = hit.category;
       // 仅「用户归类规则命中」写入判定依据；内置词典为低置信兜底（通用关键词），
@@ -144,6 +146,31 @@ function applyUserCategoryRules(rows: ImportRow[]): void {
       }
     }
   }
+}
+
+/**
+ * 账单「分类列」取值 → 落库分类名（平台分类映射，纯函数）。
+ * 处理顺序：归一化（去括号/全角差异）→ ①精确映射到系统默认分类 → ②交易形态占位值视为无分类 → ③原样保留。
+ * 优先级说明：精确映射高于关键词词典（词典是"包含匹配"，会把「充值缴费」误命中「居住」的「缴费」），
+ * 因此平台分类名的准确含义必须先由映射表钉死；映射不到的值再由 resolveImportCategory 的词典兜底。
+ * @param raw    账单分类列原始值
+ * @param txType 该行收支方向（已知时传入）：支出类映射名不套用到收入行（如「商业服务→购物」在收入行应留空，
+ *               交给商户/备注文本的词典兜底），避免支出分类被收入行复用污染统计
+ * @returns 系统默认分类名；`undefined` 表示该值不是消费分类（如「信用借还」「商户消费」），应保持空分类
+ */
+export function mapBillCategoryName(raw?: string | null, txType?: ImportTxType): string | undefined {
+  const s = String(raw ?? '').trim();
+  if (!s) return undefined;
+  // 归一化口径与分类解析一致（剥离门店/括注后缀），保证「信用借还(花呗)」也能被忽略
+  const norm = normalizeCategoryName(s) || s;
+  if (PLATFORM_CATEGORY_IGNORE.includes(norm)) return undefined;
+  const mapped = PLATFORM_CATEGORY_MAP[norm];
+  if (!mapped) return s;
+  // 方向校验：映射目标与行方向不一致时不套用（income 行不落支出分类，反之亦然）
+  const mappedIsIncome = INCOME_CATEGORY_SET.has(mapped);
+  if (txType === 'income' && !mappedIsIncome) return undefined;
+  if (txType === 'expense' && mappedIsIncome) return undefined;
+  return mapped;
 }
 
 type RefAccount = { id: number; name: string };
@@ -187,6 +214,9 @@ const BUILTIN_CATEGORY_META = new Map<string, { icon: string; color: string }>(
   DEFAULT_CATEGORIES.map(([name, , icon, color]) => [name, { icon, color }])
 );
 
+/** 系统默认的**收入类**分类名集合（供平台分类映射做方向校验，避免支出分类被收入行复用） */
+const INCOME_CATEGORY_SET = new Set(DEFAULT_CATEGORIES.filter(([, type]) => type === 'income').map(([name]) => name));
+
 /**
  * 分类解析「三级收敛」（纯函数，便于单测）：
  * ① 归一化精确命中：按「归一化名称 + 类型」匹配库中已有分类，未命中再宽松比对「库名归一化后相等」；
@@ -196,14 +226,14 @@ const BUILTIN_CATEGORY_META = new Map<string, { icon: string; color: string }>(
  * @param name 账单行分类名（未归一化的原始值）
  * @param type 交易类型（income/expense 等，决定分类的 type 口径）
  * @param catMap 库中已有分类（key=`名称|类型`，value=id）；命中后可能写入记忆化 key，避免重复遍历
- * @param classify 内置词典归类函数（可注入，便于测试）
+ * @param classify 内置词典归类函数（可注入，便于测试；第二个参数为行方向，词典按方向过滤规则）
  * @returns `{ name, id }`：name 为最终分类名（新建时使用）；id 非 null 表示复用已有分类
  */
 export function resolveImportCategory(
   name: string,
   type: ImportTxType,
   catMap: Map<string, number>,
-  classify: (t: string) => { category: string; via: string } | null = classifyBuiltinCategory,
+  classify: (t: string, type?: 'expense' | 'income') => { category: string; via: string } | null = classifyBuiltinCategory,
 ): { name: string; id: number | null } {
   const normName = normalizeCategoryName(name) || String(name).trim();
   // ① 归一化精确命中：先按「归一化名称 + 类型」直查
@@ -222,7 +252,9 @@ export function resolveImportCategory(
   }
   // ② 内置词典兜底：别名/未建分类的账单分类名命中内置词典 → 复用内置分类
   if (id == null) {
-    const b = classify(normName);
+    // 词典按行方向过滤：仅 income/expense 行需要定向，transfer/repay_in 不计收支，全量匹配
+    const dir = type === 'income' || type === 'expense' ? type : undefined;
+    const b = classify(normName, dir);
     if (b) {
       const bKey = `${b.category}|${type}`;
       id = catMap.get(bKey) ?? null;
@@ -811,7 +843,10 @@ function findBillHeader(aoa: string[][]): { headerIdx: number; cols: Record<stri
         io, amt,
         splitIncome: split.incomeCol,
         splitExpense: split.expenseCol,
+        // 「交易类型」列只代表交易形态（商户消费/转账/微信红包…），不能当分类；
+        // 真正的消费分类列仅有「交易分类 / 商品分类 / 分类」。微信账单无此类列 → -1（分类交给商户名兜底）。
         type: billColIndex(row, ['交易类型', '交易分类', '商品分类', '分类']),
+        category: billColIndex(row, ['交易分类', '商品分类', '分类']),
         peer: billColIndex(row, ['交易对方', '对方户名', '商户名称', '商家名称', '收款方', '交易对方名称', '对方账户']),
         goods: billColIndex(row, ['商品', '商品说明', '商品名称', '物品', '用途']),
         channel: billColIndex(row, ['支付方式', '收/付款方式', '付款方式', '付款账户', '扣款账户', '出账账户', '资金来源', '资金渠道', '收付款方式', '账户名称']),
@@ -855,6 +890,8 @@ export function parseBillAOA(aoa: unknown[][], rules: ImportRule[] = []): { rows
     const time = v(cols.time);
     const date = (cols.date >= 0 ? parseBillDate(v(cols.date)) || parseBillDate(time) : parseBillDate(time)) || '';
     const channel = v(cols.channel) || '';
+    // 行方向（可能为 null：不计收支/分列账单），仅用于平台分类映射的方向校验
+    const dirHint = classifyBillDirection(v(cols.io)) ?? undefined;
     return {
       line: lineNo,
       amount,
@@ -862,7 +899,8 @@ export function parseBillAOA(aoa: unknown[][], rules: ImportRule[] = []): { rows
       // 账户归属：付款方式先经「资金池词典」解析（零钱→微信零钱、余额→支付宝余额等精确资金池账户），
       // 银行卡尾号/未知付款方式退回归一化名；空值兜底「未识别账户」
       account: resolvePayMethodAccount(channel) || '未识别账户',
-      category: v(cols.type) || undefined,
+      // 分类只取「交易分类/商品分类/分类」列，并经平台分类映射收敛到系统默认分类
+      category: mapBillCategoryName(v(cols.category), dirHint),
       note: [v(cols.goods), v(cols.note)].filter(Boolean).join(' ') || undefined,
       payTime: time || undefined,
       payMethod: channel || undefined,
@@ -939,7 +977,9 @@ export function parseBillAOA(aoa: unknown[][], rules: ImportRule[] = []): { rows
         ...common,
         type: isCredit ? 'repay_in' : 'income',
         account: dest || '未识别账户',
-        category: typeText || '退款',
+        // 退款行的「交易类型」可能是「转账-退款」等复合值，统一记为「退款」，
+        // 由分类解析的词典兜底到「其他收入」，避免新建「转账-退款」这类无意义分类
+        category: '退款',
         _pending: '退款去向待确认',
         // 依据：退款回信用账户是负债减少（不计收入）；回储蓄卡/余额才是真实收入
         basis: isCredit ? '账单识别「退款」→ 负债减少（回信用账户，不计收入）' : '账单识别「退款」→ 收入（回原付款渠道）',
@@ -1183,7 +1223,7 @@ export function parseAoaWithMap(
     let typeF: ImportTxType = type;
     let accountF = account;
     let toAccountF = at(row, 'toAccount') || undefined;
-    let categoryF = at(row, 'category') || undefined;
+    let categoryF = mapBillCategoryName(at(row, 'category'), type);
     let basis: string | undefined;
     if (ruleHit) {
       typeF = ruleHit.type;

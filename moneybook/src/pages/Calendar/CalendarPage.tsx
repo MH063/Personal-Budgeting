@@ -7,6 +7,7 @@ import { listRecurring, type Recurring } from '@/api/recurring';
 import { listGoals, type SavingsGoal } from '@/api/savings';
 import { listLoans, getLoanNextDue, type Loan } from '@/api/loans';
 import { listTransactionsDetailed, type TransactionDetail } from '@/api/transactions';
+import { buildSubscriptionReminders } from '@/api/subscription';
 import {
   normalizeEvents,
   groupByDay,
@@ -14,6 +15,8 @@ import {
   type CalendarEvent,
   type CalendarEventKind,
   type LoanDueSrc,
+  type SubscriptionDueSrc,
+  type GoalTargetSrc,
 } from '@/lib/calendarEvents';
 import { formatMoney } from '@/lib/format';
 
@@ -22,6 +25,8 @@ const KIND_META: Record<CalendarEventKind, { icon: string; color: string; label:
   recurring: { icon: '🔄', color: 'var(--color-primary)', label: '周期记账', link: '/settings?tab=recurring', action: '去生成' },
   savings: { icon: '🎯', color: '#10B981', label: '储蓄计提', link: '/savings', action: '去计提' },
   loan: { icon: '💳', color: '#F59E0B', label: '借贷还款', link: '/loans', action: '去处理' },
+  subscription: { icon: '📱', color: '#8B5CF6', label: '订阅扣费', link: '/insights', action: '去查看' },
+  goal: { icon: '🏁', color: '#06B6D4', label: '目标日', link: '/savings', action: '去查看' },
 };
 
 const WEEK_HEADER = ['一', '二', '三', '四', '五', '六', '日'];
@@ -42,6 +47,25 @@ function loansToDue(loans: Loan[]): LoanDueSrc[] {
     });
   }
   return out;
+}
+
+/** 订阅/固定扣费：取检测结果中带最近扣费日的批次，转成日历叠加层需要的结构 */
+function subscriptionsToDue(items: { key: string; label: string; amount: number; lastDate: string | null }[]): SubscriptionDueSrc[] {
+  return items
+    .filter((b) => b.lastDate)
+    .map((b) => ({ id: b.key, label: b.label, amount: b.amount, lastDate: b.lastDate }));
+}
+
+/** 储蓄目标：取带目标日期的目标，转成日历叠加层需要的结构（目标日与计提日分别展示） */
+function goalsToTarget(goals: SavingsGoal[]): GoalTargetSrc[] {
+  return goals.map((g) => ({
+    id: g.id,
+    name: g.name,
+    status: g.status,
+    target_date: g.target_date,
+    target_amount: g.target_amount,
+    current_amount: g.current_amount,
+  }));
 }
 
 /** 网格小字用的紧凑金额（万级缩写，避免数字把格子撑破） */
@@ -107,6 +131,11 @@ export default function CalendarPage() {
     queryKey: ['calendar', 'loans'],
     queryFn: listLoans,
   });
+  // 订阅/固定扣费（从近 6 个月流水反向识别）与目标日：只读，不触发任何写库动作
+  const { data: subs } = useQuery({
+    queryKey: ['calendar', 'subscriptions'],
+    queryFn: () => buildSubscriptionReminders(),
+  });
 
   const month = anchor.format('YYYY-MM');
 
@@ -119,8 +148,14 @@ export default function CalendarPage() {
 
   // 组装 + 过滤/排序，dayMap 供网格徽标使用
   const monthEvents = useMemo(
-    () => normalizeEvents(buildEvents(month, recurring, goals, loansToDue(loans)), month),
-    [month, recurring, goals, loans]
+    () => normalizeEvents(
+      buildEvents(month, recurring, goals, loansToDue(loans), {
+        subscriptions: subscriptionsToDue(subs?.items ?? []),
+        goals: goalsToTarget(goals),
+      }),
+      month
+    ),
+    [month, recurring, goals, loans, subs]
   );
   const dayMap = useMemo(() => groupByDay(monthEvents), [monthEvents]);
   const todayStr = dayjs().format('YYYY-MM-DD');
@@ -169,7 +204,7 @@ export default function CalendarPage() {
 
   // 本月事件按类型的小计（顶部统计条）
   const kindSummary = useMemo(() => {
-    const s: Record<CalendarEventKind, number> = { recurring: 0, savings: 0, loan: 0 };
+    const s: Record<CalendarEventKind, number> = { recurring: 0, savings: 0, loan: 0, subscription: 0, goal: 0 };
     for (const e of monthEvents) s[e.kind] += 1;
     return s;
   }, [monthEvents]);
@@ -181,7 +216,7 @@ export default function CalendarPage() {
     <div>
       <PageHeader
         title="日历视图"
-        description="一屏查看每日实际收支与即将到来的计划（周期记账/储蓄计提/借贷还款）；点某天看当天明细，每条计划可直达对应功能处理"
+        description="一屏查看每日实际收支与即将到来的计划（周期记账/储蓄计提/借贷还款/订阅扣费/目标日）；点某天看当天明细，每条计划可直达对应功能处理"
       />
 
       {/* 月份切换栏 */}

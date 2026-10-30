@@ -4,7 +4,7 @@
  * tab 唯一性与完整性。
  */
 import { describe, it, expect } from 'vitest';
-import { resolveSettingsTab, SETTINGS_TABS, DEFAULT_SETTINGS_TAB } from '@/lib/settingsTabs';
+import { resolveSettingsTab, SETTINGS_TABS, DEFAULT_SETTINGS_TAB, SETTINGS_GROUPS, searchSettingsTabs, groupTitleOfTab } from '@/lib/settingsTabs';
 
 describe('resolveSettingsTab：URL query 定位设置子页', () => {
   it('合法 tab 参数正确解析', () => {
@@ -55,5 +55,41 @@ describe('SETTINGS_TABS 配置完整性', () => {
       expect(t.label.length).toBeGreaterThan(0);
       expect(t.icon.length).toBeGreaterThan(0);
     }
+  });
+});
+
+describe('SETTINGS_GROUPS 分组完整性', () => {
+  it('每个子页恰好属于一个分组（无遗漏、无重复）', () => {
+    const all = SETTINGS_GROUPS.flatMap((g) => g.keys);
+    expect(new Set(all).size).toBe(all.length);
+    expect(new Set(all).size).toBe(SETTINGS_TABS.length);
+  });
+
+  it('groupTitleOfTab 能返回所属分组标题', () => {
+    expect(groupTitleOfTab('budget')).toBe('预算与周期');
+    expect(groupTitleOfTab('help')).toBe('系统与帮助');
+  });
+});
+
+describe('searchSettingsTabs 设置搜索', () => {
+  it('空查询返回全部子页', () => {
+    expect(searchSettingsTabs('')).toHaveLength(SETTINGS_TABS.length);
+    expect(searchSettingsTabs('   ')).toHaveLength(SETTINGS_TABS.length);
+  });
+
+  it('按中文标签搜索命中对应子页', () => {
+    expect(searchSettingsTabs('预算')).toContain('budget');
+    expect(searchSettingsTabs('备份')).toContain('backup');
+  });
+
+  it('支持别名与英文 key，大小写不敏感', () => {
+    expect(searchSettingsTabs('AI')).toContain('ai');
+    expect(searchSettingsTabs('ai')).toContain('ai');
+    expect(searchSettingsTabs('支付宝')).toContain('import');
+    expect(searchSettingsTabs('excel')).toContain('export');
+  });
+
+  it('无匹配时返回空数组', () => {
+    expect(searchSettingsTabs('不存在的关键词xyz')).toEqual([]);
   });
 });

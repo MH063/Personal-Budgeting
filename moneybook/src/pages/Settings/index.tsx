@@ -15,22 +15,15 @@ import StorageManage from './StorageManage';
 import ShortcutSetting from './ShortcutSetting';
 import AboutSystem from './AboutSystem';
 import Help from './Help';
-import { SETTINGS_TABS, resolveSettingsTab } from '@/lib/settingsTabs';
+import { SETTINGS_TABS, SETTINGS_GROUPS, resolveSettingsTab, searchSettingsTabs, groupTitleOfTab } from '@/lib/settingsTabs';
+import { Input } from '@/components/ui/input';
 
 /**
  * 设置页：把分散子页合并为少数分区（同一页内分组展示，功能零丢失）。
- * 单击组标题展开该组内的若干子页；支持 ?tab=xxx 深链定位到对应组。
+ * 单击组标题展开该组内的若干子页；支持 ?tab=xxx 深链定位到对应组；
+ * 顶部搜索框可跨分组按关键词（含别名/英文 key）直达子页。
  */
-const GROUPS: { title: string; icon: string; desc: string; keys: string[] }[] = [
-  { title: '分类与标签', icon: '🏷️', desc: '分类与标签的增删改', keys: ['category', 'tag'] },
-  { title: '账户与模板', icon: '👛', desc: '账户管理、常用交易模板', keys: ['account', 'templates'] },
-  { title: '预算与周期', icon: '📊', desc: '预算、周期性记账', keys: ['budget', 'recurring'] },
-  { title: '智能规则与 AI', icon: '🧠', desc: '全部规则、参考知识与 AI 助手', keys: ['rules', 'ai'] },
-  { title: '数据备份与导出', icon: '💾', desc: '账目导入、报表导出与 JSON 导出、数据库备份', keys: ['import', 'export', 'backup'] },
-  // 「使用说明」原单独成组且仅 1 项，显得单薄；并入「系统与存储」并更名为「系统与帮助」，
-  // 与「关于系统」相邻成组，减少一个空壳分组（与帮助页分组顺序保持呼应）。
-  { title: '系统与帮助', icon: '🖥️', desc: '存储空间、快捷键、关于系统与使用说明', keys: ['storage', 'shortcut', 'about', 'help'] },
-];
+const GROUPS = SETTINGS_GROUPS;
 const keyLabel = (k: string) => SETTINGS_TABS.find((t) => t.key === k)?.label ?? k;
 
 function Rendered({ k }: { k: string }) {
@@ -57,6 +50,10 @@ function Rendered({ k }: { k: string }) {
 export default function Settings() {
   const [searchParams, setSearchParams] = useSearchParams();
   const currentTab = resolveSettingsTab(searchParams.get('tab'));
+  // 搜索关键词：非空时在顶部展示跨分组的搜索结果，点击可直接跳转对应子页
+  const [q, setQ] = useState('');
+  const matchedTabs = searchSettingsTabs(q);
+  const searching = q.trim().length > 0;
   
   // 查找当前 tab 所在的组索引
   const activeGroupIdx = GROUPS.findIndex((g) => g.keys.includes(currentTab));
@@ -74,6 +71,35 @@ export default function Settings() {
       <div>
         <h1 className="text-2xl font-bold tracking-tight">设置</h1>
         <p className="mt-1 text-sm text-muted">统一管理分类、账户、预算、智能规则、AI 与数据。</p>
+      </div>
+
+      {/* 搜索：跨分组按关键词直达子页（支持别名与英文 key） */}
+      <div className="flex flex-col gap-2">
+        <Input
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="搜索设置项：如 预算 / 备份 / AI / 导入"
+          className="w-full sm:w-80"
+        />
+        {searching && (
+          matchedTabs.length === 0 ? (
+            <p className="text-xs text-muted">没有匹配的设置项，试试更短的关键词。</p>
+          ) : (
+            <div className="flex flex-wrap gap-2">
+              {matchedTabs.map((k) => (
+                <button
+                  key={k}
+                  type="button"
+                  onClick={() => setSearchParams({ tab: k })}
+                  className={`rounded-xl border border-[var(--border)] px-3 py-1.5 text-sm transition-colors
+                    ${currentTab === k ? 'bg-[var(--fg)] text-[var(--bg)]' : 'bg-[var(--card)] text-muted hover:bg-black/5 dark:hover:bg-white/10'}`}
+                >
+                  <span className="text-xs opacity-70">{groupTitleOfTab(k)} · </span>{keyLabel(k)}
+                </button>
+              ))}
+            </div>
+          )
+        )}
       </div>
 
       {/* 一级导航：分组 */}

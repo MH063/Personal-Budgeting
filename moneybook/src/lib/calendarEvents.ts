@@ -2,10 +2,10 @@ import dayjs from 'dayjs';
 
 /**
  * 日历视图统一事件模型。
- * 聚合三类「待发生」计划：周期记账、储蓄自动计提、借贷还款。
+ * 聚合五类「计划/待发生」事件：周期记账、储蓄自动计提、借贷还款、订阅扣费、储蓄目标日。
  * kind 决定展示的颜色/图标；date 决定落在日历的哪一天。
  */
-export type CalendarEventKind = 'recurring' | 'savings' | 'loan';
+export type CalendarEventKind = 'recurring' | 'savings' | 'loan' | 'subscription' | 'goal';
 
 export interface CalendarEvent {
   /** 唯一标识（源类型 + 源 id） */
@@ -75,19 +75,48 @@ export interface LoanDueSrc {
   payment: number;
 }
 
+/** 订阅/固定扣费来源（由 api/subscription 的 detectMonthlyRecurring 识别后传入） */
+export interface SubscriptionDueSrc {
+  /** 批次键（收款方 + 金额） */
+  id: string;
+  label: string;
+  amount: number;
+  /** 最近一次扣费日 YYYY-MM-DD */
+  lastDate: string | null;
+}
+
+/** 储蓄目标来源（带目标日期时在日历上叠加「目标日」） */
+export interface GoalTargetSrc {
+  id: number;
+  name: string;
+  status: string;
+  target_date: string | null;
+  target_amount: number;
+  current_amount: number;
+}
+
+/** 额外两类计划事件的入参（可选，保持 buildEvents 旧调用方式可用） */
+export interface ExtraEventSrc {
+  subscriptions?: SubscriptionDueSrc[];
+  goals?: GoalTargetSrc[];
+}
+
 /**
- * 把三类「计划中事件」组装成日历统一事件（纯函数，不触碰数据库）：
+ * 把五类「计划中事件」组装成日历统一事件（纯函数，不触碰数据库）：
  * - 周期记账：仅保留 next_run 落在本月的项；
  * - 储蓄目标：进行中且启用自动计提，若本月已计提过（last_auto_month === 本月）则不再待发生，
  *   计提日 = 该月 auto_day（超月末裁，用 nextMonthlyDay）；
- * - 借贷：按组件传回的 loansDue（本期应还）中落在本月的项展示。
+ * - 借贷：按组件传回的 loansDue（本期应还）中落在本月的项展示；
+ * - 订阅扣费：按最近扣费日的「日」在本月推算扣费日（早于订阅开始月份不展示）；
+ * - 目标日：进行中目标且 target_date 落在本月，金额取剩余缺口。
  * 返回未过滤/未排序的原始事件，交给 normalizeEvents 处理。
  */
 export function buildEvents(
   month: string,
   recurring: RecurringSrc[],
   savings: SavingsSrc[],
-  loansDue: LoanDueSrc[]
+  loansDue: LoanDueSrc[],
+  extra: ExtraEventSrc = {}
 ): CalendarEvent[] {
   const events: CalendarEvent[] = [];
 
@@ -125,6 +154,33 @@ export function buildEvents(
       date: loan.dueDate,
       title: `${dir}·${loan.counterparty || '借贷'}`,
       amount: loan.payment,
+    });
+  }
+
+  // 订阅/固定扣费：按最近扣费日的「日」在本月推算；订阅开始前的月份不展示
+  for (const s of extra.subscriptions ?? []) {
+    if (!s.lastDate || !(s.amount > 0)) continue;
+    if (month < s.lastDate.slice(0, 7)) continue;
+    const day = nextMonthlyDay(Number(s.lastDate.slice(8, 10)), month);
+    events.push({
+      id: `subscription-${s.id}`,
+      kind: 'subscription',
+      date: `${month}-${`${day}`.padStart(2, '0')}`,
+      title: `订阅·${s.label}`,
+      amount: s.amount,
+    });
+  }
+
+  // 目标日：进行中且目标日期落在本月的储蓄目标，金额展示「还差多少」
+  for (const g of extra.goals ?? []) {
+    if (g.status !== 'active' || !g.target_date || !g.target_date.startsWith(month)) continue;
+    const gap = Math.max(0, g.target_amount - g.current_amount);
+    events.push({
+      id: `goal-${g.id}`,
+      kind: 'goal',
+      date: g.target_date,
+      title: `目标日·${g.name}`,
+      amount: gap,
     });
   }
 

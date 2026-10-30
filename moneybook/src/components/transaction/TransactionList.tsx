@@ -118,7 +118,17 @@ export default function TransactionList({ type, onEdit }: { type?: string; onEdi
   };
 
   async function handleExport() {
-    const rows = await listTransactionsDetailed({ ...currentFilters, limit: 100000 });
+    // 分批拉取：一次性 10 万行查询会同时占用 IPC 与内存，界面也会长时间无响应；
+    // 按当前筛选条件逐页累加，拿到不足一页即结束（上限用于防御异常数据导致的死循环）
+    const EXPORT_PAGE = 1000;
+    const MAX_EXPORT = 200000;
+    const all: TransactionDetail[] = [];
+    for (let offset = 0; offset < MAX_EXPORT; offset += EXPORT_PAGE) {
+      const batch = await listTransactionsDetailed({ ...currentFilters, limit: EXPORT_PAGE, offset });
+      all.push(...batch);
+      if (batch.length < EXPORT_PAGE) break;
+    }
+    const rows = all;
     // 导出纯数值（非带 ¥ 的格式化字符串），便于再导入或表格软件做数值计算/排序。
     // 金额列带符号反映对净资产的影响（收入 +、支出/借出/还出 -、转账 0），
     // 另设独立的收入/支出列，方便按方向筛选汇总。

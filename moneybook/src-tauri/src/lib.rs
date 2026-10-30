@@ -97,6 +97,12 @@ fn get_migrations() -> Vec<Migration> {
             sql: include_str!("../migrations/015_ensure_categories_unique.sql"),
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 16,
+            description: "transactions_ledger_date_index",
+            sql: include_str!("../migrations/016_transactions_ledger_date_index.sql"),
+            kind: MigrationKind::Up,
+        },
     ]
 }
 

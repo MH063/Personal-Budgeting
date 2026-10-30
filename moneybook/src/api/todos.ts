@@ -3,6 +3,7 @@ import { currentLedgerId } from '@/lib/ledger';
 import { calcLoanInterest, checkOverdueLoans, getLoanNextDue, listLoans } from './loans';
 import { listGoals } from './savings';
 import { getBudgetVsActual } from './stats';
+import { markShadowedBudgets } from '@/lib/budgetRemaining';
 import dayjs from 'dayjs';
 
 export interface TodoItem {
@@ -83,7 +84,9 @@ export async function getTodoItems(): Promise<TodoItem[]> {
   // 3) 预算超支
   try {
     const budgetVs = await getBudgetVsActual(today.format('YYYY-MM'));
-    for (const b of budgetVs) {
+    for (const b of markShadowedBudgets(budgetVs)) {
+      // 已被总预算覆盖的分类预算：实际支出已计入总预算，不再单独生成超支待办（避免重复提醒）
+      if (b.shadowed) continue;
       if (b.actual > b.budget_amount) {
         items.push({
           kind: 'over_budget', severity: 'danger',

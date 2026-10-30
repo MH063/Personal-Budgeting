@@ -156,6 +156,37 @@ describe('calendarEvents.buildEvents', () => {
   it('全部输入为空时返回空数组', () => {
     expect(buildEvents('2026-09', [], [], [])).toEqual([]);
   });
+
+  it('订阅扣费：按最近扣费日的日号在本月叠加，早于订阅开始月份不展示', () => {
+    const subscriptions = [
+      { id: 'a||1500', label: '视频会员', amount: 15, lastDate: '2026-09-20' },
+      { id: 'b||9900', label: '云盘', amount: 99, lastDate: '2026-10-05' },
+    ];
+    // 9 月：只展示 9 月开始前已存在的订阅（视频会员本月 20 日再次扣费）
+    const sep = buildEvents('2026-09', [], [], [], { subscriptions });
+    expect(sep.map((e) => `${e.kind}:${e.date}`)).toEqual(['subscription:2026-09-20']);
+    // 10 月：两个订阅都展示
+    const oct = buildEvents('2026-10', [], [], [], { subscriptions });
+    expect(oct.map((e) => e.date).sort()).toEqual(['2026-10-05', '2026-10-20']);
+  });
+
+  it('订阅扣费：日号超过当月天数时裁到月末', () => {
+    const subscriptions = [{ id: 'a', label: '房租', amount: 3000, lastDate: '2026-01-31' }];
+    const result = buildEvents('2026-02', [], [], [], { subscriptions });
+    expect(result[0].date).toBe('2026-02-28');
+  });
+
+  it('目标日：仅进行中且目标日期落在本月，金额为剩余缺口', () => {
+    const goals = [
+      { id: 1, name: '旅行基金', status: 'active', target_date: '2026-09-30', target_amount: 10000, current_amount: 4000 },
+      { id: 2, name: '已完成', status: 'completed', target_date: '2026-09-15', target_amount: 1000, current_amount: 1000 },
+      { id: 3, name: '下月目标', status: 'active', target_date: '2026-10-10', target_amount: 500, current_amount: 100 },
+    ];
+    const result = buildEvents('2026-09', [], [], [], { goals });
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({ id: 'goal-1', kind: 'goal', date: '2026-09-30', amount: 6000 });
+    expect(result[0].title).toContain('旅行基金');
+  });
 });
 
 describe('calendarEvents 边界/空输入', () => {

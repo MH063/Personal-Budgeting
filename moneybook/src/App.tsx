@@ -29,7 +29,6 @@ const ReconcilePage = lazy(() => import('@/pages/Reconcile'));
 const Settings = lazy(() => import('@/pages/Settings'));
 const CalendarPage = lazy(() => import('@/pages/Calendar/CalendarPage'));
 const InsightsPage = lazy(() => import('@/pages/Insights'));
-const FinancialCheckupPage = lazy(() => import('@/pages/FinancialCheckup'));
 // 导入解析结果：独立窗口由 main.tsx 按窗口标签（import-preview）直接渲染，
 // 不再走 hash 路由（曾用 #/import-preview，多窗口首屏出现过整窗白屏）。
 
@@ -110,7 +109,8 @@ export default function App() {
             {/* 统计"洞察"已并入 /insights，旧地址重定向 */}
             <Route path="/stats/insights" element={<Navigate to="/insights" replace />} />
             <Route path="/insights" element={<InsightsPage />} />
-            <Route path="/financial-checkup" element={<FinancialCheckupPage />} />
+            {/* 财务体检已并入智能洞察页的「财务体检」页签，旧地址重定向保留 */}
+            <Route path="/financial-checkup" element={<Navigate to="/insights?tab=checkup" replace />} />
             <Route path="/trash" element={<TrashPage />} />
             <Route path="/reconcile" element={<ReconcilePage />} />
             <Route path="/calendar" element={<CalendarPage />} />

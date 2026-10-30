@@ -4,7 +4,11 @@
  * 排除归属其他批次/取前 200 条）、对账单解析（表头别名/dimension/异常容错）。
  */
 import { describe, it, expect } from 'vitest';
-import { buildLocalUnmatchedQuery, buildLocalUnmatchedCount, buildReconDiffRows, excelDateToStr, type Reconciliation, type ReconItem, type LocalUnmatchedTx } from '@/api/reconciliation';
+import {
+  buildLocalUnmatchedQuery, buildLocalUnmatchedCount, buildReconDiffRows, excelDateToStr,
+  buildBalanceAdjustment, bankDirection, txDirectionForAccount, chunkArray,
+  type Reconciliation, type ReconItem, type LocalUnmatchedTx,
+} from '@/api/reconciliation';
 
 const rec = (partial: Partial<Reconciliation>): Reconciliation => ({
   id: 1,
@@ -141,5 +145,127 @@ describe('excelDateToStr：Excel 日期 → YYYY-MM-DD（不涉时区）', () =>
   it('空串/非日期输入返回空串', () => {
     expect(excelDateToStr('')).toBe('');
     expect(excelDateToStr('not-a-date')).toBe('');
+  });
+});
+
+describe('buildBalanceAdjustment：余额调节表', () => {
+  const bankItem = (income: number, expense: number): ReconItem => ({
+    id: 1,
+    reconciliation_id: 1,
+    bank_row: JSON.stringify({ date: '2026-09-10', summary: '测试', income, expense, balance: 0, line: 2 }),
+    transaction_id: null,
+    match_kind: 'unmatched_bank',
+    matched_at: '',
+  });
+
+  it('两侧调整后相等时 balanced=true', () => {
+    const r = buildBalanceAdjustment({
+      bankEndBalance: 1000,
+      calcBalance: 1000,
+      localNotBankNet: 0,
+      localNotBankCount: 0,
+      bankUnmatched: [],
+      amountMismatch: [],
+    });
+    expect(r.adjustedBank).toBe(1000);
+    expect(r.adjustedLocal).toBe(1000);
+    expect(r.difference).toBe(0);
+    expect(r.balanced).toBe(true);
+  });
+
+  it('本地已记·银行未记收入 → 银行侧加回该净额', () => {
+    const r = buildBalanceAdjustment({
+      bankEndBalance: 900,
+      calcBalance: 1000,
+      localNotBankNet: 100,
+      localNotBankCount: 1,
+      bankUnmatched: [],
+      amountMismatch: [],
+    });
+    expect(r.adjustedBank).toBe(1000);
+    expect(r.adjustedLocal).toBe(1000);
+    expect(r.balanced).toBe(true);
+  });
+
+  it('银行已记·本地未记支出 → 本地侧扣减后与银行侧相等', () => {
+    const r = buildBalanceAdjustment({
+      bankEndBalance: 1000,
+      calcBalance: 1050,
+      localNotBankNet: 0,
+      localNotBankCount: 0,
+      bankUnmatched: [bankItem(0, 50)],
+      amountMismatch: [],
+    });
+    expect(r.bankNotLocalNet).toBe(-50);
+    expect(r.adjustedLocal).toBe(1000);
+    expect(r.balanced).toBe(true);
+  });
+
+  it('未填银行余额时无法计算差额', () => {
+    const r = buildBalanceAdjustment({
+      bankEndBalance: null,
+      calcBalance: 1000,
+      localNotBankNet: 0,
+      localNotBankCount: 0,
+      bankUnmatched: [],
+      amountMismatch: [],
+    });
+    expect(r.adjustedBank).toBeNull();
+    expect(r.difference).toBeNull();
+    expect(r.balanced).toBe(false);
+  });
+});
+
+describe('bankDirection：银行流水方向', () => {
+  it('净额为正 → in（钱进入对账账户）', () => {
+    expect(bankDirection({ income: 100, expense: 0 })).toBe('in');
+  });
+
+  it('净额为负 → out（钱转出对账账户）', () => {
+    expect(bankDirection({ income: 0, expense: 50 })).toBe('out');
+  });
+
+  it('收支配平或仅浮点尾差 → none', () => {
+    expect(bankDirection({ income: 100, expense: 100 })).toBe('none');
+    expect(bankDirection({ income: 100.001, expense: 100 })).toBe('none');
+  });
+});
+
+describe('txDirectionForAccount：本地交易相对对账账户的方向', () => {
+  const tx = (type: string, account_id: number, to_account_id: number | null = null) => ({ type, account_id, to_account_id });
+
+  it('收入/借入/收回借款 → in', () => {
+    expect(txDirectionForAccount(tx('income', 2), 2)).toBe('in');
+    expect(txDirectionForAccount(tx('borrow', 2), 2)).toBe('in');
+    expect(txDirectionForAccount(tx('repay_in', 2), 2)).toBe('in');
+  });
+
+  it('支出/借出/还款 → out', () => {
+    expect(txDirectionForAccount(tx('expense', 2), 2)).toBe('out');
+    expect(txDirectionForAccount(tx('lend', 2), 2)).toBe('out');
+    expect(txDirectionForAccount(tx('repay_out', 2), 2)).toBe('out');
+  });
+
+  it('转账：钱转入对账账户 → in（回归：此前恒为 transfer 导致永不匹配）', () => {
+    expect(txDirectionForAccount(tx('transfer', 5, 2), 2)).toBe('in');
+  });
+
+  it('转账：钱转出对账账户 → out', () => {
+    expect(txDirectionForAccount(tx('transfer', 2, 5), 2)).toBe('out');
+  });
+
+  it('转账两端都不涉及对账账户 → none', () => {
+    expect(txDirectionForAccount(tx('transfer', 5, 6), 2)).toBe('none');
+  });
+});
+
+describe('chunkArray：金额分批预筛', () => {
+  it('按固定大小切分，最后一片不足也保留', () => {
+    expect(chunkArray([1, 2, 3, 4, 5], 2)).toEqual([[1, 2], [3, 4], [5]]);
+  });
+
+  it('空数组返回空列表；非法分块大小返回原数组单片', () => {
+    expect(chunkArray([], 2)).toEqual([]);
+    expect(chunkArray([1, 2], 0)).toEqual([[1, 2]]);
   });
 });

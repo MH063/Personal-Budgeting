@@ -8,6 +8,8 @@ import { CategoryPie } from '@/components/charts/CategoryPie';
 import { getMonthlySurplus, getCategoryDistribution, getNetWorth, getBudgetVsActual, getInsights } from '@/api/stats';
 import { useOverdueLoans } from '@/hooks/useLoans';
 import { getTodoItems, type TodoItem } from '@/api/todos';
+import { computeSpendable, markShadowedBudgets } from '@/lib/budgetRemaining';
+import { formatMoney } from '@/lib/format';
 import AiAssistant from '@/components/ai/AiAssistant';
 import AdvancedAnalysis from '@/components/ai/AdvancedAnalysis';
 
@@ -43,7 +45,10 @@ export default function Dashboard() {
   });
 
   const thisMonth = trend.find((t) => t.month === dayjs().format('YYYY-MM'));
-  const overBudget = budgetVs.filter((b) => b.actual > b.budget_amount);
+  // 存在总预算时，分类预算只是明细（已被总预算覆盖），不单独计入超支判断，避免同一笔支出重复报警
+  const budgetRows = markShadowedBudgets(budgetVs);
+  // 本月剩余可花：有预算才展示；无预算时整块隐藏，不用模拟数据占位
+  const spendable = computeSpendable(budgetVs);
 
   // 严重度配色：边框/底色用 color-mix 做透明叠加。
   // 历史缺陷：此前误把 Tailwind 的「/40」透明度语法写进 inline style
@@ -122,17 +127,48 @@ export default function Dashboard() {
         <StatCard title="净资产" value={networth?.netWorth ?? 0} color="#1E6FA9" />
       </div>
 
+      {/* 本月剩余可花：预算总额度 − 已用，并折算成「每天还能花多少」 */}
+      {spendable.hasBudget && (
+        <div className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-4">
+          <div className="flex flex-wrap items-end justify-between gap-3">
+            <div>
+              <h3 className="font-semibold">本月剩余可花</h3>
+              <p className="mt-1 text-xs text-muted">
+                {spendable.scope === 'total' ? '按总预算计算' : '按各分类预算合计计算'} · 额度 {formatMoney(spendable.totalBudget)} · 已用 {formatMoney(spendable.spent)}
+              </p>
+            </div>
+            <div className="text-right">
+              <div className="text-2xl font-bold" style={{ color: spendable.overBudget ? 'var(--color-danger)' : '#10B981' }}>
+                {formatMoney(spendable.remaining)}
+              </div>
+              <div className="text-xs text-muted">
+                剩余 {spendable.daysLeft} 天 · 日均可用 {formatMoney(spendable.perDay)}
+              </div>
+            </div>
+          </div>
+          {spendable.overBudget && (
+            <p className="mt-2 text-xs" style={{ color: 'var(--color-danger)' }}>
+              已超出预算 {formatMoney(Math.abs(spendable.remaining))}，建议压缩非必需支出或调整预算。
+            </p>
+          )}
+        </div>
+      )}
+
       {budgetVs.length > 0 && (
         <div className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-4">
           <h3 className="mb-3 font-semibold">本月预算</h3>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            {budgetVs.map((b) => {
+            {budgetRows.map((b) => {
               const pct = b.budget_amount > 0 ? (b.actual / b.budget_amount) * 100 : 0;
-              const over = b.actual > b.budget_amount;
+              // 被总预算覆盖的分类行：只作为明细展示，不单独判超支（额度不可与总预算叠加）
+              const over = !b.shadowed && b.actual > b.budget_amount;
               return (
-                <div key={b.id} className="rounded-lg border border-[var(--border)] p-3">
+                <div key={b.id} className={`rounded-lg border border-[var(--border)] p-3${b.shadowed ? ' opacity-60' : ''}`}>
                   <div className="flex items-center justify-between text-sm">
-                    <span className="font-medium">{b.category_icon} {b.category_name ?? '总预算'}</span>
+                    <span className="font-medium">
+                      {b.category_icon} {b.category_name ?? '总预算'}
+                      {b.shadowed && <span className="ml-1 text-[10px] text-muted">已含于总预算</span>}
+                    </span>
                     <span className={over ? 'font-semibold' : 'text-muted'} style={over ? { color: 'var(--color-danger)' } : {}}>
                       {over ? `超支 ${b.actual.toFixed(2)}` : (b.actual / Math.max(b.budget_amount, 1) * 100).toFixed(0) + '%'}
                     </span>

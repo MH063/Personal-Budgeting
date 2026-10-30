@@ -120,16 +120,18 @@ export async function withdrawFromGoal(goalId: number, p: {
     if (pool.includes(p.toAccountId)) throw new Error('转入账户不能是目标的归集账户');
 
     // 选择来源账户：优先级 = 调用方指定(若在池中且余额足) > 池中首个余额充足的账户
+    // 一次性查询候选账户余额，避免逐个账户往返（池子大时是 N 次 IPC）
     const candidates = pool.filter((a) => a !== p.toAccountId);
     if (!candidates.length) throw new Error('目标未关联可支取的归集账户');
     const prefs = p.accountId && candidates.includes(p.accountId)
       ? [p.accountId, ...candidates.filter((c) => c !== p.accountId)]
       : candidates;
-    let src: number | null = null;
-    for (const c of prefs) {
-      const [acc] = await select<{ balance: number }>(`SELECT balance FROM accounts WHERE id = $1`, [c]);
-      if (acc && acc.balance >= p.amount - 0.0001) { src = c; break; }
-    }
+    const accRows = await select<{ id: number; balance: number }>(
+      `SELECT id, balance FROM accounts WHERE id IN (${prefs.map((_, i) => `$${i + 1}`).join(',')})`,
+      prefs
+    );
+    const balanceMap = new Map(accRows.map((r) => [r.id, r.balance]));
+    const src = prefs.find((c) => (balanceMap.get(c) ?? 0) >= p.amount - 0.0001) ?? null;
     if (src == null) throw new Error('归集账户余额不足，无法完成支取');
 
     await createTransaction({

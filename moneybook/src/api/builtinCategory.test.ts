@@ -29,6 +29,18 @@ describe('classifyBuiltinCategory', () => {
   it('空文本返回 null', () => {
     expect(classifyBuiltinCategory('')).toBeNull();
   });
+
+  it('按行方向过滤：支出行不落收入分类，收入行不落支出分类', () => {
+    // 历史缺陷：词典不区分方向，「退款/红包」的支出行会被归到「其他收入/奖金」
+    expect(classifyBuiltinCategory('退款到账', 'expense')).toBeNull();
+    expect(classifyBuiltinCategory('退款到账', 'income')?.category).toBe('其他收入');
+    expect(classifyBuiltinCategory('发放红包', 'expense')).toBeNull();
+    expect(classifyBuiltinCategory('发放红包', 'income')?.category).toBe('奖金');
+    expect(classifyBuiltinCategory('星巴克咖啡', 'income')).toBeNull();
+    expect(classifyBuiltinCategory('工资发放', 'expense')).toBeNull();
+    // 不传方向（transfer/repay_in 等不计收支行）时按全量规则匹配
+    expect(classifyBuiltinCategory('退款到账')?.category).toBe('其他收入');
+  });
 });
 
 describe('classifyBuiltinCategory / 分类名对齐系统默认分类', () => {
